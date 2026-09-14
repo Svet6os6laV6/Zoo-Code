@@ -1,3 +1,4 @@
+import * as path from "path"
 import * as vscode from "vscode"
 
 import { type ModeConfig, type PromptComponent, type CustomModePrompts, type TodoItem } from "@roo-code/types"
@@ -91,10 +92,16 @@ async function generatePrompt(
 
 	// Tools catalog is not included in the system prompt.
 	const toolsCatalog = ""
+	const taskContextSection = settings?.taskContext
+		? `Current task: ${settings.taskContext.taskId}\nTask artifacts: ${path
+				.relative(cwd, settings.taskContext.taskRoot)
+				.split(path.sep)
+				.join("/")}/\n\n`
+		: ""
 
 	const basePrompt = `${roleDefinition}
 
-${markdownFormattingSection()}
+${taskContextSection}${markdownFormattingSection()}
 
 ${getSharedToolUseSection()}${toolsCatalog}
 

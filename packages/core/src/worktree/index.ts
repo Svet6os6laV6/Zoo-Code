@@ -11,3 +11,4 @@ export * from "./types.js"
 // Services
 export { WorktreeService, worktreeService } from "./worktree-service.js"
 export { WorktreeIncludeService, worktreeIncludeService, type CopyProgressCallback } from "./worktree-include.js"
+export { TaskResolver, TaskResolutionError, type TaskContext, type TaskResolveContext } from "./task-resolver.js"

@@ -1,3 +1,5 @@
+import type { TaskContext } from "@roo-code/core"
+
 /**
  * Settings passed to system prompt generation functions
  */
@@ -9,4 +11,5 @@ export interface SystemPromptSettings {
 	newTaskRequireTodos: boolean
 	/** When true, model should hide vendor/company identity in responses */
 	isStealthModel?: boolean
+	taskContext?: TaskContext
 }

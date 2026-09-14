@@ -230,6 +230,35 @@ describe("SYSTEM_PROMPT", () => {
 		expect(prompt).toMatchFileSnapshot("./__snapshots__/system-prompt/consistent-system-prompt.snap")
 	})
 
+	it("includes resolved task metadata", async () => {
+		const prompt = await SYSTEM_PROMPT(
+			mockContext,
+			"/test/path",
+			false,
+			undefined,
+			undefined,
+			defaultModeSlug,
+			undefined,
+			undefined,
+			undefined,
+			experiments,
+			undefined,
+			undefined,
+			{
+				todoListEnabled: true,
+				useAgentRules: true,
+				newTaskRequireTodos: false,
+				taskContext: {
+					taskId: "SITESUP-1116",
+					branch: "feature/SITESUP-1116-heartbeat",
+					taskRoot: "/test/path/.roo/tasks/SITESUP-1116",
+				},
+			},
+		)
+
+		expect(prompt).toContain("Current task: SITESUP-1116\nTask artifacts: .roo/tasks/SITESUP-1116/")
+	})
+
 	it("should include MCP server info when mcpHub is provided", async () => {
 		mockMcpHub = createMockMcpHub(true)
 

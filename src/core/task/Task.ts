@@ -59,6 +59,7 @@ import {
 } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
+import { TaskResolver, type TaskContext } from "@roo-code/core"
 
 // api
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
@@ -143,6 +144,7 @@ import { type TaskExecutionContext } from "./providerHandoff"
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const QUEUED_FEEDBACK_SAVE_RETRY_DELAYS_MS = [250, 1_000, 4_000] as const
+const defaultTaskResolver = new TaskResolver()
 
 type QueuedAskResolution = { response: ClineAskResponse; requiresDurableAck: boolean }
 
@@ -196,6 +198,7 @@ export interface TaskOptions extends CreateTaskOptions {
 	diffFuzzyThreshold?: number
 	/** Explicit task-local execution context for a delegated child. */
 	handoffExecutionContext?: TaskExecutionContext
+	taskResolver?: Pick<TaskResolver, "resolve">
 }
 
 type AssistantMessagePersistenceResult = boolean
@@ -502,6 +505,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// Initial status for the task's history item (set at creation time to avoid race conditions)
 	private readonly initialStatus?: "active" | "delegated" | "completed" | "interrupted"
 	private pendingAction?: PendingTaskAction
+	private readonly taskResolver: Pick<TaskResolver, "resolve">
+	private taskContextPromise?: Promise<TaskContext>
 
 	// MessageManager for high-level message operations (lazy initialized)
 	private _messageManager?: MessageManager
@@ -528,6 +533,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		rateLimitClock,
 		diffFuzzyThreshold,
 		handoffExecutionContext,
+		taskResolver = defaultTaskResolver,
 	}: TaskOptions) {
 		super()
 		this.resetAssistantMessagePersistence()
@@ -590,6 +596,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.checkpointTimeout = checkpointTimeout
 
 		this.parentTask = parentTask
+		this.taskResolver = taskResolver
 		this.taskNumber = taskNumber
 		this.initialStatus = initialStatus
 		this.pendingAction = historyItem?.pendingAction
@@ -4162,6 +4169,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	private async getSystemPrompt(): Promise<string> {
+		const taskContext = await this.getTaskContext()
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
@@ -4225,12 +4233,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						.getConfiguration(Package.name)
 						.get<boolean>("newTaskRequireTodos", false),
 					isStealthModel: modelInfo?.isStealthModel,
+					taskContext,
 				},
 				undefined, // todoList
 				this.api.getModel().id,
 				provider.getSkillsManager(),
 			)
 		})()
+	}
+
+	public getTaskContext(): Promise<TaskContext> {
+		this.taskContextPromise ??=
+			this.parentTask?.getTaskContext() ?? this.taskResolver.resolve({ workspacePath: this.workspacePath })
+
+		return this.taskContextPromise
 	}
 
 	private getCurrentProfileId(state: any): string {

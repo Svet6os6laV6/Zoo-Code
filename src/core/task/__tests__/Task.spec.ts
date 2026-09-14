@@ -791,6 +791,11 @@ describe("Cline", () => {
 
 	describe("task-local configuration isolation", () => {
 		it("uses the task mode and API configuration when focused provider state differs", async () => {
+			const taskContext = {
+				taskId: "SITESUP-1116",
+				branch: "feature/SITESUP-1116-heartbeat",
+				taskRoot: "/mock/workspace/path/.roo/tasks/SITESUP-1116",
+			}
 			const taskApiConfiguration: ProviderSettings = {
 				...mockApiConfig,
 				todoListEnabled: true,
@@ -805,6 +810,7 @@ describe("Cline", () => {
 				apiConfiguration: taskApiConfiguration,
 				task: "test task",
 				startTask: false,
+				taskResolver: { resolve: vi.fn().mockResolvedValue(taskContext) },
 			})
 			await task.getTaskMode()
 
@@ -820,7 +826,54 @@ describe("Cline", () => {
 			const systemPromptCall = requireDefined(vi.mocked(SYSTEM_PROMPT).mock.calls.at(-1))
 			const [, , , , , mode, , , , , , , settings] = systemPromptCall
 			expect(mode).toBe("architect")
-			expect(settings).toMatchObject({ todoListEnabled: true })
+			expect(settings).toMatchObject({ todoListEnabled: true, taskContext })
+		})
+
+		it("shares one resolved task context across Architect, Code, Reviewer, and QA tasks", async () => {
+			const taskContext = {
+				taskId: "SITESUP-1116",
+				branch: "feature/SITESUP-1116-heartbeat",
+				taskRoot: "/mock/workspace/path/.roo/tasks/SITESUP-1116",
+			}
+			const resolve = vi.fn().mockResolvedValue(taskContext)
+			const architect = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "architect",
+				startTask: false,
+				workspacePath: "/mock/workspace/path",
+				handoffExecutionContext: {
+					mode: "architect",
+					apiConfigName: undefined,
+					apiConfiguration: mockApiConfig,
+				},
+				taskResolver: { resolve },
+			})
+			const tasks = [
+				architect,
+				...["code", "reviewer", "qa"].map(
+					(mode) =>
+						new Task({
+							provider: mockProvider,
+							apiConfiguration: mockApiConfig,
+							task: mode,
+							startTask: false,
+							parentTask: architect,
+							rootTask: architect,
+							handoffExecutionContext: {
+								mode,
+								apiConfigName: undefined,
+								apiConfiguration: mockApiConfig,
+							},
+						}),
+				),
+			]
+
+			const contexts = await Promise.all(tasks.map((task) => task.getTaskContext()))
+
+			expect(contexts).toEqual(tasks.map(() => taskContext))
+			expect(resolve).toHaveBeenCalledOnce()
+			expect(resolve).toHaveBeenCalledWith({ workspacePath: "/mock/workspace/path" })
 		})
 
 		it("uses the task mode when manually condensing after focused state changes", async () => {

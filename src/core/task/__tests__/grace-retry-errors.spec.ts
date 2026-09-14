@@ -14,6 +14,9 @@ import { providerIdentifiers } from "@roo-code/types/provider-identifiers"
 
 // Mock @roo-code/core
 vi.mock("@roo-code/core", () => ({
+	TaskResolver: class {
+		resolve = vi.fn()
+	},
 	customToolRegistry: {
 		getTools: vi.fn().mockReturnValue([]),
 		hasTool: vi.fn().mockReturnValue(false),
