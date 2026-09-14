@@ -253,10 +253,18 @@ describe("SYSTEM_PROMPT", () => {
 					branch: "feature/SITESUP-1116-heartbeat",
 					taskRoot: "/test/path/.roo/tasks/SITESUP-1116",
 				},
+				taskState: {
+					taskId: "SITESUP-1116",
+					status: "IMPLEMENTATION",
+					currentTask: "T02",
+					currentTaskArtifact: "/test/path/.roo/tasks/SITESUP-1116/implementation/T02-worker-heartbeat.md",
+				},
 			},
 		)
 
-		expect(prompt).toContain("Current task: SITESUP-1116\nTask artifacts: .roo/tasks/SITESUP-1116/")
+		expect(prompt).toContain(
+			"Current task: SITESUP-1116\nTask artifacts: .roo/tasks/SITESUP-1116/\nTask status: IMPLEMENTATION\nImplementation unit: T02\nArtifact: .roo/tasks/SITESUP-1116/implementation/T02-worker-heartbeat.md",
+		)
 	})
 
 	it("should include MCP server info when mcpHub is provided", async () => {

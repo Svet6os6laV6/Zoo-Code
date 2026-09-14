@@ -59,7 +59,7 @@ import {
 } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
-import { TaskResolver, type TaskContext } from "@roo-code/core"
+import { TaskResolver, TaskStateResolver, type TaskContext } from "@roo-code/core"
 
 // api
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
@@ -145,6 +145,7 @@ const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const QUEUED_FEEDBACK_SAVE_RETRY_DELAYS_MS = [250, 1_000, 4_000] as const
 const defaultTaskResolver = new TaskResolver()
+const defaultTaskStateResolver = new TaskStateResolver()
 
 type QueuedAskResolution = { response: ClineAskResponse; requiresDurableAck: boolean }
 
@@ -199,6 +200,7 @@ export interface TaskOptions extends CreateTaskOptions {
 	/** Explicit task-local execution context for a delegated child. */
 	handoffExecutionContext?: TaskExecutionContext
 	taskResolver?: Pick<TaskResolver, "resolve">
+	taskStateResolver?: Pick<TaskStateResolver, "resolve">
 }
 
 type AssistantMessagePersistenceResult = boolean
@@ -506,6 +508,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly initialStatus?: "active" | "delegated" | "completed" | "interrupted"
 	private pendingAction?: PendingTaskAction
 	private readonly taskResolver: Pick<TaskResolver, "resolve">
+	private readonly taskStateResolver: Pick<TaskStateResolver, "resolve">
 	private taskContextPromise?: Promise<TaskContext>
 
 	// MessageManager for high-level message operations (lazy initialized)
@@ -534,6 +537,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		diffFuzzyThreshold,
 		handoffExecutionContext,
 		taskResolver = defaultTaskResolver,
+		taskStateResolver = defaultTaskStateResolver,
 	}: TaskOptions) {
 		super()
 		this.resetAssistantMessagePersistence()
@@ -597,6 +601,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		this.parentTask = parentTask
 		this.taskResolver = taskResolver
+		this.taskStateResolver = taskStateResolver
 		this.taskNumber = taskNumber
 		this.initialStatus = initialStatus
 		this.pendingAction = historyItem?.pendingAction
@@ -4170,6 +4175,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	private async getSystemPrompt(): Promise<string> {
 		const taskContext = await this.getTaskContext()
+		const taskState = await this.taskStateResolver.resolve(taskContext)
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
@@ -4234,6 +4240,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						.get<boolean>("newTaskRequireTodos", false),
 					isStealthModel: modelInfo?.isStealthModel,
 					taskContext,
+					taskState,
 				},
 				undefined, // todoList
 				this.api.getModel().id,

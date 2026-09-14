@@ -92,12 +92,22 @@ async function generatePrompt(
 
 	// Tools catalog is not included in the system prompt.
 	const toolsCatalog = ""
-	const taskContextSection = settings?.taskContext
-		? `Current task: ${settings.taskContext.taskId}\nTask artifacts: ${path
-				.relative(cwd, settings.taskContext.taskRoot)
-				.split(path.sep)
-				.join("/")}/\n\n`
-		: ""
+	const taskContextLines = settings?.taskContext
+		? [
+				`Current task: ${settings.taskContext.taskId}`,
+				`Task artifacts: ${path.relative(cwd, settings.taskContext.taskRoot).split(path.sep).join("/")}/`,
+			]
+		: []
+	if (settings?.taskState) {
+		taskContextLines.push(`Task status: ${settings.taskState.status}`)
+		taskContextLines.push(`Implementation unit: ${settings.taskState.currentTask ?? "NONE"}`)
+		if (settings.taskState.currentTaskArtifact) {
+			taskContextLines.push(
+				`Artifact: ${path.relative(cwd, settings.taskState.currentTaskArtifact).split(path.sep).join("/")}`,
+			)
+		}
+	}
+	const taskContextSection = taskContextLines.length > 0 ? `${taskContextLines.join("\n")}\n\n` : ""
 
 	const basePrompt = `${roleDefinition}
 

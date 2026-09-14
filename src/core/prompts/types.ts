@@ -1,4 +1,4 @@
-import type { TaskContext } from "@roo-code/core"
+import type { TaskContext, TaskState } from "@roo-code/core"
 
 /**
  * Settings passed to system prompt generation functions
@@ -12,4 +12,5 @@ export interface SystemPromptSettings {
 	/** When true, model should hide vendor/company identity in responses */
 	isStealthModel?: boolean
 	taskContext?: TaskContext
+	taskState?: TaskState
 }

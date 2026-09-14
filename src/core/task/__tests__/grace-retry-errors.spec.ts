@@ -17,6 +17,9 @@ vi.mock("@roo-code/core", () => ({
 	TaskResolver: class {
 		resolve = vi.fn()
 	},
+	TaskStateResolver: class {
+		resolve = vi.fn()
+	},
 	customToolRegistry: {
 		getTools: vi.fn().mockReturnValue([]),
 		hasTool: vi.fn().mockReturnValue(false),
