@@ -227,6 +227,18 @@ export class WorktreeService {
 	}
 
 	/**
+	 * Get the unified diff of a worktree, optionally against a base ref.
+	 *
+	 * `git diff <base>` compares the working tree (including commits made since
+	 * `base`) with that ref, which is what a task workspace review needs.
+	 */
+	async getDiff(cwd: string, base?: string): Promise<string> {
+		const args = base ? ["diff", base] : ["diff"]
+		const { stdout } = await execFileAsync("git", args, { cwd })
+		return stdout
+	}
+
+	/**
 	 * Checkout a branch in the current worktree
 	 */
 	async checkoutBranch(cwd: string, branch: string): Promise<WorktreeResult> {

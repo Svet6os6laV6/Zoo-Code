@@ -2,6 +2,7 @@ import * as path from "path"
 import * as vscode from "vscode"
 
 import { type ModeConfig, type PromptComponent, type CustomModePrompts, type TodoItem } from "@roo-code/types"
+import { formatArtifactValidationIssues } from "@roo-code/core"
 
 import { Mode, modes, defaultModeSlug, getModeBySlug, getGroupName, getModeSelection } from "../../shared/modes"
 import { DiffStrategy } from "../../shared/tools"
@@ -109,9 +110,16 @@ async function generatePrompt(
 	}
 	const taskContextSection = taskContextLines.length > 0 ? `${taskContextLines.join("\n")}\n\n` : ""
 
+	// Structural artifact problems are injected so the model repairs the artifacts
+	// in the current session instead of guessing around them.
+	const artifactValidationSection =
+		settings?.artifactValidationIssues && settings.artifactValidationIssues.length > 0
+			? `Artifact validation issues:\n${formatArtifactValidationIssues(settings.artifactValidationIssues)}\n\n`
+			: ""
+
 	const basePrompt = `${roleDefinition}
 
-${taskContextSection}${markdownFormattingSection()}
+${taskContextSection}${artifactValidationSection}${markdownFormattingSection()}
 
 ${getSharedToolUseSection()}${toolsCatalog}
 

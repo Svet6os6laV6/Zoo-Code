@@ -20,6 +20,14 @@ vi.mock("@roo-code/core", () => ({
 	TaskStateResolver: class {
 		resolve = vi.fn()
 	},
+	TaskStateError: class TaskStateError extends Error {},
+	ArtifactValidator: class {
+		validate = vi.fn()
+	},
+	TaskScheduler: class {
+		assignNext = vi.fn()
+	},
+	formatArtifactValidationIssues: vi.fn().mockReturnValue(""),
 	customToolRegistry: {
 		getTools: vi.fn().mockReturnValue([]),
 		hasTool: vi.fn().mockReturnValue(false),

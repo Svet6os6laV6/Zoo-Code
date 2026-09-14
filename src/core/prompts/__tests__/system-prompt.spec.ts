@@ -267,6 +267,39 @@ describe("SYSTEM_PROMPT", () => {
 		)
 	})
 
+	it("should include artifact validation issues when provided", async () => {
+		const prompt = await SYSTEM_PROMPT(
+			mockContext,
+			"/test/path",
+			false,
+			undefined,
+			undefined,
+			defaultModeSlug,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{
+				todoListEnabled: true,
+				useAgentRules: true,
+				newTaskRequireTodos: false,
+				artifactValidationIssues: [
+					{
+						severity: "error",
+						code: "unknown-dependency",
+						taskId: "T03",
+						message: "dependency T99 does not exist",
+					},
+					{ severity: "error", code: "missing-handoff", taskId: null, message: "Missing handoff.md" },
+				],
+			},
+		)
+
+		expect(prompt).toContain("Artifact validation issues:\nT03: dependency T99 does not exist\nMissing handoff.md")
+	})
+
 	it("should include MCP server info when mcpHub is provided", async () => {
 		mockMcpHub = createMockMcpHub(true)
 

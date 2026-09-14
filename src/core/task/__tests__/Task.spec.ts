@@ -812,6 +812,23 @@ describe("Cline", () => {
 				mcpEnabled: false,
 			} as unknown as ProviderState)
 
+			const artifactValidator = {
+				validate: vi.fn().mockResolvedValue({
+					issues: [],
+					errors: [],
+					warnings: [],
+					valid: true,
+					artifacts: {
+						directory: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation",
+						missingDirectory: false,
+						tasks: [],
+						duplicateIds: [],
+						unexpectedFiles: [],
+					},
+				}),
+			}
+			const taskScheduler = { assignNext: vi.fn().mockResolvedValue(null) }
+
 			const task = new Task({
 				provider: mockProvider,
 				apiConfiguration: taskApiConfiguration,
@@ -819,6 +836,8 @@ describe("Cline", () => {
 				startTask: false,
 				taskResolver: { resolve: vi.fn().mockResolvedValue(taskContext) },
 				taskStateResolver: { resolve: vi.fn().mockResolvedValue(taskState) },
+				artifactValidator,
+				taskScheduler,
 			})
 			await task.getTaskMode()
 
@@ -834,7 +853,14 @@ describe("Cline", () => {
 			const systemPromptCall = requireDefined(vi.mocked(SYSTEM_PROMPT).mock.calls.at(-1))
 			const [, , , , , mode, , , , , , , settings] = systemPromptCall
 			expect(mode).toBe("architect")
-			expect(settings).toMatchObject({ todoListEnabled: true, taskContext, taskState })
+			expect(settings).toMatchObject({
+				todoListEnabled: true,
+				taskContext,
+				taskState,
+				artifactValidationIssues: [],
+			})
+			expect(artifactValidator.validate).toHaveBeenCalledWith(taskContext, { status: "IMPLEMENTATION" })
+			expect(taskScheduler.assignNext).toHaveBeenCalledWith(taskContext, taskState)
 		})
 
 		it("shares one resolved task context across Architect, Code, Reviewer, and QA tasks", async () => {

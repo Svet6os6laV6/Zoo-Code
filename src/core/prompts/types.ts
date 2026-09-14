@@ -1,4 +1,4 @@
-import type { TaskContext, TaskState } from "@roo-code/core"
+import type { ArtifactValidationIssue, TaskContext, TaskState } from "@roo-code/core"
 
 /**
  * Settings passed to system prompt generation functions
@@ -13,4 +13,6 @@ export interface SystemPromptSettings {
 	isStealthModel?: boolean
 	taskContext?: TaskContext
 	taskState?: TaskState
+	/** Structural artifact problems the model must repair. */
+	artifactValidationIssues?: ArtifactValidationIssue[]
 }

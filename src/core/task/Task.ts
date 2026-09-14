@@ -59,7 +59,16 @@ import {
 } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
-import { TaskResolver, TaskStateResolver, type TaskContext } from "@roo-code/core"
+import {
+	ArtifactValidator,
+	TaskResolver,
+	TaskScheduler,
+	TaskStateError,
+	TaskStateResolver,
+	type ArtifactValidationIssue,
+	type TaskContext,
+	type TaskState,
+} from "@roo-code/core"
 
 // api
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
@@ -146,6 +155,8 @@ const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const QUEUED_FEEDBACK_SAVE_RETRY_DELAYS_MS = [250, 1_000, 4_000] as const
 const defaultTaskResolver = new TaskResolver()
 const defaultTaskStateResolver = new TaskStateResolver()
+const defaultArtifactValidator = new ArtifactValidator()
+const defaultTaskScheduler = new TaskScheduler()
 
 type QueuedAskResolution = { response: ClineAskResponse; requiresDurableAck: boolean }
 
@@ -201,6 +212,8 @@ export interface TaskOptions extends CreateTaskOptions {
 	handoffExecutionContext?: TaskExecutionContext
 	taskResolver?: Pick<TaskResolver, "resolve">
 	taskStateResolver?: Pick<TaskStateResolver, "resolve">
+	artifactValidator?: Pick<ArtifactValidator, "validate">
+	taskScheduler?: Pick<TaskScheduler, "assignNext">
 }
 
 type AssistantMessagePersistenceResult = boolean
@@ -509,6 +522,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private pendingAction?: PendingTaskAction
 	private readonly taskResolver: Pick<TaskResolver, "resolve">
 	private readonly taskStateResolver: Pick<TaskStateResolver, "resolve">
+	private readonly artifactValidator: Pick<ArtifactValidator, "validate">
+	private readonly taskScheduler: Pick<TaskScheduler, "assignNext">
 	private taskContextPromise?: Promise<TaskContext>
 
 	// MessageManager for high-level message operations (lazy initialized)
@@ -538,6 +553,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		handoffExecutionContext,
 		taskResolver = defaultTaskResolver,
 		taskStateResolver = defaultTaskStateResolver,
+		artifactValidator = defaultArtifactValidator,
+		taskScheduler = defaultTaskScheduler,
 	}: TaskOptions) {
 		super()
 		this.resetAssistantMessagePersistence()
@@ -602,6 +619,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.parentTask = parentTask
 		this.taskResolver = taskResolver
 		this.taskStateResolver = taskStateResolver
+		this.artifactValidator = artifactValidator
+		this.taskScheduler = taskScheduler
 		this.taskNumber = taskNumber
 		this.initialStatus = initialStatus
 		this.pendingAction = historyItem?.pendingAction
@@ -4175,7 +4194,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	private async getSystemPrompt(): Promise<string> {
 		const taskContext = await this.getTaskContext()
-		const taskState = await this.taskStateResolver.resolve(taskContext)
+		const { taskState, artifactIssues } = await this.resolveTaskState(taskContext)
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
@@ -4241,6 +4260,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					isStealthModel: modelInfo?.isStealthModel,
 					taskContext,
 					taskState,
+					artifactValidationIssues: artifactIssues,
 				},
 				undefined, // todoList
 				this.api.getModel().id,
@@ -4254,6 +4274,58 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.parentTask?.getTaskContext() ?? this.taskResolver.resolve({ workspacePath: this.workspacePath })
 
 		return this.taskContextPromise
+	}
+
+	/**
+	 * Resolve the durable task state, validate the artifacts, and let the harness
+	 * assign the next ready implementation unit.
+	 *
+	 * Artifact problems never abort prompt generation: they are returned as issues
+	 * so the model can repair the artifacts in the current session. The scheduler
+	 * runs only when the artifacts are structurally valid, and it is idempotent
+	 * (an unfinished assignment is never replaced).
+	 */
+	private async resolveTaskState(
+		taskContext: TaskContext,
+	): Promise<{ taskState: TaskState; artifactIssues: ArtifactValidationIssue[] }> {
+		const artifactIssues: ArtifactValidationIssue[] = []
+		let taskState: TaskState
+
+		try {
+			taskState = await this.taskStateResolver.resolve(taskContext)
+		} catch (error) {
+			if (!(error instanceof TaskStateError)) {
+				throw error
+			}
+
+			// A malformed README must not break prompt generation: report the problem
+			// and let the model repair the canonical block.
+			artifactIssues.push({
+				severity: "error",
+				code: "invalid-task-state",
+				taskId: null,
+				message: error.message,
+			})
+			taskState = {
+				taskId: taskContext.taskId,
+				status: "ANALYSIS",
+				currentTask: null,
+				currentTaskArtifact: null,
+			}
+		}
+
+		const report = await this.artifactValidator.validate(taskContext, { status: taskState.status })
+		artifactIssues.push(...report.issues)
+
+		if (report.valid) {
+			const assignment = await this.taskScheduler.assignNext(taskContext, taskState)
+
+			if (assignment) {
+				taskState = assignment.state
+			}
+		}
+
+		return { taskState, artifactIssues }
 	}
 
 	private getCurrentProfileId(state: any): string {
