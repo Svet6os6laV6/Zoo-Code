@@ -39,6 +39,7 @@
 	"settings.autoImportSettingsPath.description": "Path to a ZooCode configuration file to automatically import on extension startup. Supports absolute paths and paths relative to the home directory (e.g. '~/Documents/zoo-code-settings.json'). Leave empty to disable auto-import.",
 	"settings.maximumIndexedFilesForFileSearch.description": "Maximum number of files to index for the @ file search feature. Higher values provide better search results in large projects but may use more memory. Default: 10,000.",
 	"settings.useAgentRules.description": "Enable loading of AGENTS.md files for agent-specific rules (see https://agent-rules.org/)",
+	"settings.harnessLogFullPrompts.description": "Debug option: include the full assembled system prompt in the harness log. Credentials and secrets are always redacted. Off by default because prompts can contain workspace content.",
 	"settings.apiRequestTimeout.description": "API response timeout (seconds, default: 600, range: 1–3600). Higher values are recommended for local providers. Unsupported providers: Amazon Bedrock, Google Gemini(directly or through the Vertex AI platform), Mistral, Moonshot, Ollama, Poe, VS Code LM API.",
 	"settings.newTaskRequireTodos.description": "Require todos parameter when creating new tasks with the new_task tool",
 	"settings.codeIndex.embeddingBatchSize.description": "The batch size for embedding operations during code indexing. Adjust this based on your API provider's limits. Default is 60.",

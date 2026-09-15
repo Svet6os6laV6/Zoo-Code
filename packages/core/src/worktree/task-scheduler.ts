@@ -20,6 +20,9 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { harnessLogger } from "../observability/harness-logger.js"
+import type { HarnessLoggerPort } from "../observability/types.js"
+
 import type { TaskContext } from "./task-resolver.js"
 import type { TaskState } from "./task-state.js"
 import {
@@ -54,25 +57,63 @@ export type TaskAssignment = {
 	readonly replaced: string | null
 }
 
+/** Canonical README fields the scheduler owns, used for mutation records. */
+type CanonicalReadmeFields = {
+	readonly status: string | null
+	readonly currentTask: string | null
+	readonly nextStep: string | null
+}
+
+function readCanonicalFields(readme: string): CanonicalReadmeFields {
+	const read = (name: string): string | null => {
+		const prefix = `${name.toLowerCase()}:`
+		const line = readme.split(/\r?\n/).find((candidate) => candidate.trim().toLowerCase().startsWith(prefix))
+		if (!line) {
+			return null
+		}
+		return line.slice(line.indexOf(":") + 1).trim()
+	}
+
+	return { status: read("Status"), currentTask: read("Current Task"), nextStep: read("Next Step") }
+}
+
 export class TaskScheduler {
 	constructor(
 		private readonly fileSystem: TaskSchedulerFileSystem = fs,
 		private readonly parser: TxxParser = new TxxParser(fileSystem),
+		/** Explicit injection for tests; defaults to the process-wide harness logger. */
+		private readonly logger?: HarnessLoggerPort,
 	) {}
 
 	/**
 	 * Read-only view of the DAG. Safe to call on every task start.
 	 */
 	async plan(context: TaskContext): Promise<SchedulerPlan> {
-		const artifacts = await this.parser.read(context)
+		const logger = harnessLogger(this.logger)
 
-		return {
-			artifacts,
-			ready: readyTasks(artifacts.tasks),
-			inProgress: sortTasks(artifacts.tasks.filter((task) => task.status === "IN_PROGRESS")),
-			done: sortTasks(artifacts.tasks.filter((task) => task.status === "DONE")),
-			blocked: sortTasks(artifacts.tasks.filter((task) => task.status === "BLOCKED")),
-		}
+		return logger.span(
+			"harness.scheduler.plan",
+			async (span) => {
+				const artifacts = await this.parser.read(context)
+				const plan: SchedulerPlan = {
+					artifacts,
+					ready: readyTasks(artifacts.tasks),
+					inProgress: sortTasks(artifacts.tasks.filter((task) => task.status === "IN_PROGRESS")),
+					done: sortTasks(artifacts.tasks.filter((task) => task.status === "DONE")),
+					blocked: sortTasks(artifacts.tasks.filter((task) => task.status === "BLOCKED")),
+				}
+
+				span.annotate({
+					ready: plan.ready.map((task) => task.id),
+					inProgress: plan.inProgress.map((task) => task.id),
+					done: plan.done.map((task) => task.id),
+					blocked: plan.blocked.map((task) => task.id),
+				})
+
+				return plan
+			},
+			{ context: { taskId: context.taskId } },
+		)
 	}
 
 	/**
@@ -86,8 +127,33 @@ export class TaskScheduler {
 	 * - no task is ready (a DAG conflict the model must resolve).
 	 */
 	async assignNext(context: TaskContext, state: TaskState): Promise<TaskAssignment | null> {
-		if (state.status !== "IMPLEMENTATION" && state.status !== "READY_FOR_IMPLEMENTATION") {
+		const logger = harnessLogger(this.logger)
+		const input = {
+			status: state.status,
+			currentTask: state.currentTask,
+			currentTaskArtifact: state.currentTaskArtifact,
+		}
+
+		/**
+		 * Every exit path records the DAG/lifecycle input, the outcome (`null`
+		 * included), and why that outcome won.
+		 */
+		const skip = (reason: string, reasonCode: string, attributes: Record<string, unknown> = {}): null => {
+			logger.decision("harness.scheduler.assignNext", {
+				input,
+				result: null,
+				reason,
+				attributes: { reasonCode, ...attributes },
+				context: { taskId: state.taskId, txxId: state.currentTask },
+			})
 			return null
+		}
+
+		if (state.status !== "IMPLEMENTATION" && state.status !== "READY_FOR_IMPLEMENTATION") {
+			return skip(
+				`lifecycle stage ${state.status} does not execute implementation units`,
+				"stage-not-implementation",
+			)
 		}
 
 		const artifacts = await this.parser.read(context)
@@ -96,16 +162,28 @@ export class TaskScheduler {
 			: null
 
 		if (state.currentTask && !current) {
-			return null
+			return skip(
+				`assigned implementation unit ${state.currentTask} is missing from implementation/`,
+				"current-unit-missing",
+				{ availableUnits: artifacts.tasks.map((task) => task.id) },
+			)
 		}
 
 		if (current && (current.status === "TODO" || current.status === "IN_PROGRESS")) {
-			return null
+			return skip(
+				`implementation unit ${current.id} is still ${current.status}; resuming instead of reassigning`,
+				"current-unit-unfinished",
+				{ currentUnitStatus: current.status },
+			)
 		}
 
 		const next = readyTasks(artifacts.tasks)[0]
 		if (!next) {
-			return null
+			return skip(
+				"no implementation unit is ready; every pending unit has an unfinished dependency",
+				"no-ready-task",
+				{ pendingUnits: artifacts.tasks.filter((task) => task.status === "TODO").map((task) => task.id) },
+			)
 		}
 
 		const relativeArtifact = `implementation/${next.fileName}`
@@ -114,12 +192,18 @@ export class TaskScheduler {
 		const updated = this.writeAssignment(readme, relativeArtifact, next.id)
 
 		if (updated === null) {
-			return null
+			return skip(
+				"README has no canonical Status line; mutating an unrecognized layout is unsafe",
+				"readme-layout-unrecognized",
+				{ readmePath },
+			)
 		}
 
+		const stateBefore = readCanonicalFields(readme)
 		await this.writeAtomic(readmePath, updated)
+		const stateAfter = readCanonicalFields(updated)
 
-		return {
+		const assignment: TaskAssignment = {
 			task: next,
 			relativeArtifact,
 			replaced: current?.id ?? null,
@@ -130,6 +214,29 @@ export class TaskScheduler {
 				currentTaskArtifact: next.artifact,
 			},
 		}
+
+		logger.decision("harness.scheduler.assignNext", {
+			input: { ...input, readyUnits: readyTasks(artifacts.tasks).map((task) => task.id) },
+			result: {
+				taskId: next.id,
+				relativeArtifact,
+				replaced: assignment.replaced,
+			},
+			reason: `assigned the lowest-numbered ready implementation unit ${next.id}`,
+			attributes: { reasonCode: "assigned", replaced: assignment.replaced },
+			context: { taskId: state.taskId, txxId: next.id },
+		})
+
+		logger.mutation("harness.scheduler.assignNext", {
+			target: readmePath,
+			stateBefore,
+			stateAfter,
+			reason: `wrote the canonical assignment for ${next.id} into the task README`,
+			attributes: { reasonCode: "assigned", relativeArtifact, replaced: assignment.replaced },
+			context: { taskId: state.taskId, txxId: next.id },
+		})
+
+		return assignment
 	}
 
 	/**

@@ -1,6 +1,9 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { harnessLogger } from "../observability/harness-logger.js"
+import type { HarnessLogLevel, HarnessLoggerPort } from "../observability/types.js"
+
 import type { TaskContext } from "./task-resolver.js"
 
 const TASK_STATUSES = [
@@ -71,20 +74,50 @@ function readField(content: string, name: string): string | undefined {
 }
 
 export class TaskStateResolver {
-	constructor(private readonly fileSystem: TaskStateFileSystem = fs) {}
+	constructor(
+		private readonly fileSystem: TaskStateFileSystem = fs,
+		/** Explicit injection for tests; defaults to the process-wide harness logger. */
+		private readonly logger?: HarnessLoggerPort,
+	) {}
 
 	async resolve(context: TaskContext): Promise<TaskState> {
+		const logger = harnessLogger(this.logger)
+		const input = { taskRoot: context.taskRoot, expectedTaskId: context.taskId }
+
+		/**
+		 * Every exit path records the README-derived input, the resulting state
+		 * (or `null` when the README is rejected), and why that outcome won.
+		 */
+		const decide = (
+			result: TaskState | null,
+			reason: string,
+			reasonCode: string,
+			attributes: Record<string, unknown> = {},
+			level: HarnessLogLevel = "info",
+		): void => {
+			logger.decision("harness.taskState.resolve", {
+				level,
+				input,
+				result,
+				reason,
+				attributes: { reasonCode, ...attributes },
+				context: { taskId: context.taskId },
+			})
+		}
+
 		let readme: string
 		try {
 			readme = await this.fileSystem.readFile(path.join(context.taskRoot, "README.md"), "utf8")
 		} catch (error) {
 			if (isFileNotFound(error)) {
-				return {
+				const state: TaskState = {
 					taskId: context.taskId,
 					status: "ANALYSIS",
 					currentTask: null,
 					currentTaskArtifact: null,
 				}
+				decide(state, "task README does not exist yet; a new task starts in ANALYSIS", "missing-readme")
+				return state
 			}
 			throw error
 		}
@@ -93,62 +126,90 @@ export class TaskStateResolver {
 		const isProtocolV2 = protocolVersion === "2"
 		const artifactTaskId = readField(readme, "Task")
 		if ((isProtocolV2 && !artifactTaskId) || (artifactTaskId && artifactTaskId !== context.taskId)) {
-			throw new TaskStateError(
-				`Task identity mismatch: expected ${context.taskId}, got ${artifactTaskId ?? "missing Task"}`,
-			)
+			const message = `Task identity mismatch: expected ${context.taskId}, got ${artifactTaskId ?? "missing Task"}`
+			decide(null, message, "identity-mismatch", { artifactTaskId: artifactTaskId ?? null, isProtocolV2 }, "warn")
+			throw new TaskStateError(message)
 		}
 
 		const rawStatus = readField(readme, "Status")
 		const statusValue = !isProtocolV2 && rawStatus === "IN_PROGRESS" ? "IMPLEMENTATION" : rawStatus
 		if (!statusValue || !isTaskStatus(statusValue)) {
-			throw new TaskStateError(`Invalid task status: ${statusValue ?? "missing Status"}`)
+			const message = `Invalid task status: ${statusValue ?? "missing Status"}`
+			decide(null, message, "invalid-status", { rawStatus: rawStatus ?? null, isProtocolV2 }, "warn")
+			throw new TaskStateError(message)
 		}
+
+		const normalizedStatus = rawStatus !== statusValue
 
 		const currentTaskValue = readField(readme, "Current Task")
 		if (!currentTaskValue) {
 			if (!isProtocolV2) {
-				return {
+				const state: TaskState = {
 					taskId: context.taskId,
 					status: statusValue,
 					currentTask: null,
 					currentTaskArtifact: null,
 				}
+				decide(
+					state,
+					"legacy README without a Current Task field; no implementation unit is assigned",
+					"legacy-missing-current-task",
+					{ normalizedStatus },
+				)
+				return state
 			}
+			decide(null, "protocol v2 README is missing the Current Task field", "missing-current-task", {}, "warn")
 			throw new TaskStateError("Missing Current Task")
 		}
 
 		if (currentTaskValue === "NONE") {
 			if (isProtocolV2 && statusValue === "IMPLEMENTATION") {
-				throw new TaskStateError("IMPLEMENTATION requires Current Task")
+				const message = "IMPLEMENTATION requires Current Task"
+				decide(null, message, "implementation-without-unit", { status: statusValue }, "warn")
+				throw new TaskStateError(message)
 			}
 
-			return {
+			const state: TaskState = {
 				taskId: context.taskId,
 				status: statusValue,
 				currentTask: null,
 				currentTaskArtifact: null,
 			}
+			decide(state, "README declares no current implementation unit", "no-current-task", { normalizedStatus })
+			return state
 		}
 
 		const currentTaskMatch = /^implementation\/(T\d{2,})(?:-[^/]+)?\.md$/.exec(currentTaskValue)
 		if (!currentTaskMatch) {
-			throw new TaskStateError(`Invalid Current Task: ${currentTaskValue}`)
+			const message = `Invalid Current Task: ${currentTaskValue}`
+			decide(null, message, "invalid-current-task", { currentTaskValue }, "warn")
+			throw new TaskStateError(message)
 		}
 		if (statusValue !== "IMPLEMENTATION") {
-			throw new TaskStateError(`${statusValue} requires Current Task: NONE`)
+			const message = `${statusValue} requires Current Task: NONE`
+			decide(null, message, "unit-outside-implementation", { status: statusValue, currentTaskValue }, "warn")
+			throw new TaskStateError(message)
 		}
 
 		const currentTask = currentTaskMatch[1]
 		if (!currentTask) {
-			throw new TaskStateError(`Invalid Current Task: ${currentTaskValue}`)
+			const message = `Invalid Current Task: ${currentTaskValue}`
+			decide(null, message, "invalid-current-task", { currentTaskValue }, "warn")
+			throw new TaskStateError(message)
 		}
 
-		return {
+		const state: TaskState = {
 			taskId: context.taskId,
 			status: statusValue,
 			currentTask,
 			currentTaskArtifact: path.join(context.taskRoot, ...currentTaskValue.split("/")),
 		}
+		decide(state, "README resolved to an implementation unit", "resolved", {
+			normalizedStatus,
+			currentTaskValue,
+		})
+
+		return state
 	}
 
 	static transition(current: TaskStatus, next: TaskStatus): TaskStatus {

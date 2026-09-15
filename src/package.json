@@ -378,6 +378,11 @@
 					"default": true,
 					"description": "%settings.useAgentRules.description%"
 				},
+				"zoo-code.harnessLogFullPrompts": {
+					"type": "boolean",
+					"default": false,
+					"description": "%settings.harnessLogFullPrompts.description%"
+				},
 				"zoo-code.apiRequestTimeout": {
 					"type": "integer",
 					"default": 600,

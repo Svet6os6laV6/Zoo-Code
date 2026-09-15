@@ -17,6 +17,9 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { harnessLogger } from "../observability/harness-logger.js"
+import type { HarnessLoggerPort } from "../observability/types.js"
+
 import type { TaskContext } from "./task-resolver.js"
 import type { TaskStatus } from "./task-state.js"
 import {
@@ -112,6 +115,8 @@ export class ArtifactValidator {
 	constructor(
 		private readonly fileSystem: ArtifactFileSystem = fs,
 		private readonly parser: TxxParser = new TxxParser(fileSystem),
+		/** Explicit injection for tests; defaults to the process-wide harness logger. */
+		private readonly logger?: HarnessLoggerPort,
 	) {}
 
 	async validate(context: TaskContext, options: ArtifactValidationOptions = {}): Promise<ArtifactValidationReport> {
@@ -201,8 +206,36 @@ export class ArtifactValidator {
 
 		const errors = issues.filter((item) => item.severity === "error")
 		const warnings = issues.filter((item) => item.severity === "warning")
+		const valid = errors.length === 0
 
-		return { issues, errors, warnings, artifacts, valid: errors.length === 0 }
+		harnessLogger(this.logger).decision("harness.artifacts.validate", {
+			level: valid ? "info" : "warn",
+			input: {
+				taskId: context.taskId,
+				status: options.status ?? null,
+				requiresImplementationArtifacts,
+				taskCount: artifacts.tasks.length,
+				missingDirectory: artifacts.missingDirectory,
+			},
+			result: { valid, errorCount: errors.length, warningCount: warnings.length },
+			reason: valid
+				? "no structural artifact issues found"
+				: `${errors.length} structural artifact error(s) require repair`,
+			attributes: {
+				reasonCode: valid ? "valid" : "invalid",
+				issues: issues.map((item) => ({
+					severity: item.severity,
+					code: item.code,
+					taskId: item.taskId,
+					message: item.message,
+				})),
+				duplicateIds: artifacts.duplicateIds,
+				unexpectedFiles: artifacts.unexpectedFiles,
+			},
+			context: { taskId: context.taskId },
+		})
+
+		return { issues, errors, warnings, artifacts, valid }
 	}
 
 	private async readOptional(filePath: string): Promise<string | null> {

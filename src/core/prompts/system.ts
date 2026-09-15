@@ -2,7 +2,7 @@ import * as path from "path"
 import * as vscode from "vscode"
 
 import { type ModeConfig, type PromptComponent, type CustomModePrompts, type TodoItem } from "@roo-code/types"
-import { formatArtifactValidationIssues } from "@roo-code/core"
+import { formatArtifactValidationIssues, harnessLogger, redactPrompt } from "@roo-code/core"
 
 import { Mode, modes, defaultModeSlug, getModeBySlug, getGroupName, getModeSelection } from "../../shared/modes"
 import { DiffStrategy } from "../../shared/tools"
@@ -148,6 +148,29 @@ ${await addCustomInstructions(baseInstructions, globalCustomInstructions || "", 
 	rooIgnoreInstructions,
 	settings,
 })}`
+
+	// Structured observability: the assembly metadata is always recorded, while the
+	// full prompt is recorded only behind the `harnessLogFullPrompts` debug option
+	// and always through the redactor.
+	harnessLogger().event("harness.prompt.assemble", {
+		context: {
+			mode: mode as string,
+			taskId: settings?.taskContext?.taskId ?? null,
+			txxId: settings?.taskState?.currentTask ?? null,
+		},
+		attributes: {
+			mode,
+			modelId: modelId ?? null,
+			promptLength: basePrompt.length,
+			taskContextSectionLength: taskContextSection.length,
+			artifactValidationSectionLength: artifactValidationSection.length,
+			modesSectionLength: modesSection.length,
+			skillsSectionLength: skillsSection.length,
+			taskStatus: settings?.taskState?.status ?? null,
+			artifactIssueCount: settings?.artifactValidationIssues?.length ?? 0,
+			...(settings?.harnessLogFullPrompts ? { prompt: redactPrompt(basePrompt) } : {}),
+		},
+	})
 
 	return basePrompt
 }

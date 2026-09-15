@@ -15,4 +15,9 @@ export interface SystemPromptSettings {
 	taskState?: TaskState
 	/** Structural artifact problems the model must repair. */
 	artifactValidationIssues?: ArtifactValidationIssue[]
+	/**
+	 * Debug option: include the full assembled prompt in the harness log.
+	 * Off by default; the prompt is always redacted before it is recorded.
+	 */
+	harnessLogFullPrompts?: boolean
 }

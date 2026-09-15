@@ -19,6 +19,9 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { harnessLogger } from "../observability/harness-logger.js"
+import type { HarnessLoggerPort } from "../observability/types.js"
+
 import type { TaskContext } from "./task-resolver.js"
 
 const TASK_ID_PATTERN = /T\d{2,}/g
@@ -305,44 +308,76 @@ export function findDependencyCycles(tasks: readonly ImplementationTask[]): stri
 	return cycles
 }
 
+/** Status histogram of the parsed DAG, for the parse span. */
+function summarizeStatuses(tasks: readonly ImplementationTask[]): Record<string, number> {
+	const summary: Record<string, number> = {}
+
+	for (const task of tasks) {
+		const key = task.status ?? "UNKNOWN"
+		summary[key] = (summary[key] ?? 0) + 1
+	}
+
+	return summary
+}
+
 export class TxxParser {
-	constructor(private readonly fileSystem: ImplementationFileSystem = fs) {}
+	constructor(
+		private readonly fileSystem: ImplementationFileSystem = fs,
+		/** Explicit injection for tests; defaults to the process-wide harness logger. */
+		private readonly logger?: HarnessLoggerPort,
+	) {}
 
 	async read(context: TaskContext): Promise<ImplementationArtifacts> {
+		const logger = harnessLogger(this.logger)
 		const directory = path.join(context.taskRoot, IMPLEMENTATION_DIRECTORY)
 
-		let entries: string[]
-		try {
-			entries = await this.fileSystem.readdir(directory)
-		} catch (error) {
-			if (isFileNotFound(error)) {
-				return { directory, missingDirectory: true, tasks: [], duplicateIds: [], unexpectedFiles: [] }
-			}
-			throw error
-		}
+		return logger.span(
+			"harness.txx.parse",
+			async (span) => {
+				let entries: string[]
+				try {
+					entries = await this.fileSystem.readdir(directory)
+				} catch (error) {
+					if (isFileNotFound(error)) {
+						span.annotate({ missingDirectory: true, taskCount: 0 })
+						return { directory, missingDirectory: true, tasks: [], duplicateIds: [], unexpectedFiles: [] }
+					}
+					throw error
+				}
 
-		const taskFiles = entries.filter((entry) => TASK_FILE_NAME_PATTERN.test(entry)).sort()
-		const unexpectedFiles = entries
-			.filter((entry) => entry.endsWith(".md") && !TASK_FILE_NAME_PATTERN.test(entry))
-			.sort()
+				const taskFiles = entries.filter((entry) => TASK_FILE_NAME_PATTERN.test(entry)).sort()
+				const unexpectedFiles = entries
+					.filter((entry) => entry.endsWith(".md") && !TASK_FILE_NAME_PATTERN.test(entry))
+					.sort()
 
-		const tasks: ImplementationTask[] = []
-		for (const fileName of taskFiles) {
-			const artifact = path.join(directory, fileName)
-			const content = await this.fileSystem.readFile(artifact, "utf8")
-			tasks.push(parseImplementationTask(fileName, artifact, content))
-		}
+				const tasks: ImplementationTask[] = []
+				for (const fileName of taskFiles) {
+					const artifact = path.join(directory, fileName)
+					const content = await this.fileSystem.readFile(artifact, "utf8")
+					tasks.push(parseImplementationTask(fileName, artifact, content))
+				}
 
-		const counts = new Map<string, number>()
-		for (const task of tasks) {
-			counts.set(task.id, (counts.get(task.id) ?? 0) + 1)
-		}
+				const counts = new Map<string, number>()
+				for (const task of tasks) {
+					counts.set(task.id, (counts.get(task.id) ?? 0) + 1)
+				}
 
-		const duplicateIds = [...counts.entries()]
-			.filter(([, count]) => count > 1)
-			.map(([id]) => id)
-			.sort()
+				const duplicateIds = [...counts.entries()]
+					.filter(([, count]) => count > 1)
+					.map(([id]) => id)
+					.sort()
 
-		return { directory, missingDirectory: false, tasks, duplicateIds, unexpectedFiles }
+				span.annotate({
+					missingDirectory: false,
+					taskCount: tasks.length,
+					duplicateIds,
+					unexpectedFiles,
+					statuses: summarizeStatuses(tasks),
+				})
+
+				return { directory, missingDirectory: false, tasks, duplicateIds, unexpectedFiles }
+			},
+			{ context: { taskId: context.taskId }, attributes: { directory } },
+		)
 	}
 }

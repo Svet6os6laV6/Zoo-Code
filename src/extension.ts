@@ -20,6 +20,12 @@ import { CloudService } from "@roo-code/cloud"
 import { TelemetryService, PostHogTelemetryClient } from "@roo-code/telemetry"
 import { customToolRegistry } from "@roo-code/core"
 
+import {
+	HARNESS_OUTPUT_CHANNEL_NAME,
+	initializeHarnessLogging,
+	type HarnessLoggingHandle,
+} from "./core/harness/harness-logging"
+
 import "./utils/path" // Necessary to have access to String.prototype.toPosix.
 import { createOutputChannelLogger, createDualLogger } from "./utils/outputChannelLogger"
 import { initializeNetworkProxy } from "./utils/networkProxy"
@@ -61,6 +67,7 @@ import { initZooCodeAuth } from "./services/zoo-code-auth"
 
 let outputChannel: vscode.OutputChannel
 let extensionContext: vscode.ExtensionContext
+let harnessLogging: HarnessLoggingHandle | undefined
 let cloudService: CloudService | undefined
 
 let settingsUpdatedHandler: (() => void) | undefined
@@ -121,6 +128,23 @@ export async function activate(context: vscode.ExtensionContext) {
 	outputChannel = vscode.window.createOutputChannel(Package.outputChannel)
 	context.subscriptions.push(outputChannel)
 	outputChannel.appendLine(`${Package.name} extension activated - ${JSON.stringify(Package)}`)
+
+	// Centralized harness observability: a dedicated output channel plus a
+	// per-session JSONL log in extension storage. A failure here must not block
+	// activation, so it is reported and the harness falls back to a no-op logger.
+	try {
+		const harnessChannel = vscode.window.createOutputChannel(HARNESS_OUTPUT_CHANNEL_NAME)
+		context.subscriptions.push(harnessChannel)
+		harnessLogging = await initializeHarnessLogging({
+			globalStoragePath: context.globalStorageUri.fsPath,
+			channel: harnessChannel,
+		})
+		harnessChannel.appendLine(`Harness logging session ${harnessLogging.sessionId} -> ${harnessLogging.jsonlPath}`)
+	} catch (error) {
+		outputChannel.appendLine(
+			`[harness] Failed to initialize harness logging: ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
 
 	// Initialize network proxy configuration early, before any network requests.
 	// When proxyUrl is configured, all HTTP/HTTPS traffic will be routed through it.
@@ -383,6 +407,15 @@ export async function activate(context: vscode.ExtensionContext) {
 // This method is called when your extension is deactivated.
 export async function deactivate() {
 	outputChannel.appendLine(`${Package.name} extension deactivated`)
+
+	// Drain the harness log queue so the last records reach the JSONL file.
+	try {
+		await harnessLogging?.flush()
+	} catch (error) {
+		outputChannel.appendLine(
+			`[harness] Failed to flush harness logging: ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
 
 	if (cloudService && CloudService.hasInstance()) {
 		try {

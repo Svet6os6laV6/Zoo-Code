@@ -42,6 +42,7 @@ vi.mock("fs/promises")
 import * as vscode from "vscode"
 
 import { ModeConfig } from "@roo-code/types"
+import { HarnessLogger, resetRootHarnessLogger, setRootHarnessLogger, type HarnessLogRecord } from "@roo-code/core"
 
 import { SYSTEM_PROMPT } from "../system"
 import { McpHub } from "../../../services/mcp/McpHub"
@@ -713,5 +714,104 @@ describe("SYSTEM_PROMPT", () => {
 
 	afterAll(() => {
 		vi.restoreAllMocks()
+	})
+})
+
+describe("SYSTEM_PROMPT harness observability", () => {
+	const records: HarnessLogRecord[] = []
+
+	const taskSettings = {
+		todoListEnabled: true,
+		useAgentRules: true,
+		newTaskRequireTodos: false,
+		taskContext: {
+			taskId: "SITESUP-1116",
+			branch: "feature/SITESUP-1116-heartbeat",
+			taskRoot: "/test/path/.roo/tasks/SITESUP-1116",
+		},
+		taskState: {
+			taskId: "SITESUP-1116",
+			status: "IMPLEMENTATION" as const,
+			currentTask: "T02",
+			currentTaskArtifact: "/test/path/.roo/tasks/SITESUP-1116/implementation/T02-worker.md",
+		},
+	}
+
+	beforeEach(() => {
+		records.length = 0
+		setRootHarnessLogger(
+			new HarnessLogger({
+				context: { sessionId: "session-1" },
+				sinks: [
+					{
+						name: "test",
+						write: (record) => {
+							records.push(record)
+						},
+					},
+				],
+			}),
+		)
+	})
+
+	afterEach(() => {
+		resetRootHarnessLogger()
+	})
+
+	it("records assembly metadata without the prompt by default", async () => {
+		await SYSTEM_PROMPT(
+			mockContext,
+			"/test/path",
+			false,
+			undefined,
+			undefined,
+			defaultModeSlug,
+			undefined,
+			undefined,
+			undefined,
+			{},
+			undefined,
+			undefined,
+			taskSettings,
+		)
+
+		const record = records.find((entry) => entry.name === "harness.prompt.assemble")
+
+		expect(record).toBeDefined()
+		expect(record?.context).toMatchObject({
+			sessionId: "session-1",
+			taskId: "SITESUP-1116",
+			txxId: "T02",
+			mode: defaultModeSlug,
+		})
+		expect(record?.attributes).toMatchObject({
+			taskStatus: "IMPLEMENTATION",
+			artifactIssueCount: 0,
+			modelId: null,
+		})
+		expect(record?.attributes?.prompt).toBeUndefined()
+	})
+
+	it("records the redacted prompt only when the debug option is enabled", async () => {
+		await SYSTEM_PROMPT(
+			mockContext,
+			"/test/path",
+			false,
+			undefined,
+			undefined,
+			defaultModeSlug,
+			undefined,
+			undefined,
+			undefined,
+			{},
+			undefined,
+			undefined,
+			{ ...taskSettings, harnessLogFullPrompts: true },
+		)
+
+		const record = records.find((entry) => entry.name === "harness.prompt.assemble")
+
+		expect(typeof record?.attributes?.prompt).toBe("string")
+		expect(record?.attributes?.prompt).toContain("You are")
 	})
 })

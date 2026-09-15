@@ -27,6 +27,19 @@ vi.mock("@roo-code/core", () => ({
 	TaskScheduler: class {
 		assignNext = vi.fn()
 	},
+	StateReconciler: class {
+		reconcile = vi.fn()
+	},
+	harnessLogger: () => ({
+		context: {},
+		event: vi.fn(),
+		decision: vi.fn(),
+		mutation: vi.fn(),
+		child: vi.fn(),
+		flush: vi.fn(),
+		span: vi.fn(async (_name: string, run: (span: unknown) => unknown) => run({ annotate: vi.fn(), context: {} })),
+		runWithContext: vi.fn((_context: unknown, run: () => unknown) => run()),
+	}),
 	formatArtifactValidationIssues: vi.fn().mockReturnValue(""),
 	customToolRegistry: {
 		getTools: vi.fn().mockReturnValue([]),

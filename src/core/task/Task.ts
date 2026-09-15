@@ -61,11 +61,14 @@ import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
 import {
 	ArtifactValidator,
+	StateReconciler,
 	TaskResolver,
 	TaskScheduler,
 	TaskStateError,
 	TaskStateResolver,
+	harnessLogger,
 	type ArtifactValidationIssue,
+	type HarnessLoggerPort,
 	type TaskContext,
 	type TaskState,
 } from "@roo-code/core"
@@ -157,6 +160,7 @@ const defaultTaskResolver = new TaskResolver()
 const defaultTaskStateResolver = new TaskStateResolver()
 const defaultArtifactValidator = new ArtifactValidator()
 const defaultTaskScheduler = new TaskScheduler()
+const defaultStateReconciler = new StateReconciler()
 
 type QueuedAskResolution = { response: ClineAskResponse; requiresDurableAck: boolean }
 
@@ -214,6 +218,10 @@ export interface TaskOptions extends CreateTaskOptions {
 	taskStateResolver?: Pick<TaskStateResolver, "resolve">
 	artifactValidator?: Pick<ArtifactValidator, "validate">
 	taskScheduler?: Pick<TaskScheduler, "assignNext">
+	/** Diagnostic comparison between the runtime state and the canonical artifacts. */
+	stateReconciler?: Pick<StateReconciler, "reconcile">
+	/** Explicit logger injection; defaults to the process-wide harness logger. */
+	harnessLogger?: HarnessLoggerPort
 }
 
 type AssistantMessagePersistenceResult = boolean
@@ -524,6 +532,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly taskStateResolver: Pick<TaskStateResolver, "resolve">
 	private readonly artifactValidator: Pick<ArtifactValidator, "validate">
 	private readonly taskScheduler: Pick<TaskScheduler, "assignNext">
+	private readonly stateReconciler: Pick<StateReconciler, "reconcile">
+	private readonly harnessLogger?: HarnessLoggerPort
 	private taskContextPromise?: Promise<TaskContext>
 
 	// MessageManager for high-level message operations (lazy initialized)
@@ -555,6 +565,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		taskStateResolver = defaultTaskStateResolver,
 		artifactValidator = defaultArtifactValidator,
 		taskScheduler = defaultTaskScheduler,
+		stateReconciler = defaultStateReconciler,
+		harnessLogger: harnessLoggerOverride,
 	}: TaskOptions) {
 		super()
 		this.resetAssistantMessagePersistence()
@@ -621,6 +633,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.taskStateResolver = taskStateResolver
 		this.artifactValidator = artifactValidator
 		this.taskScheduler = taskScheduler
+		this.stateReconciler = stateReconciler
+		this.harnessLogger = harnessLoggerOverride
 		this.taskNumber = taskNumber
 		this.initialStatus = initialStatus
 		this.pendingAction = historyItem?.pendingAction
@@ -4192,7 +4206,17 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return false
 	}
 
+	/**
+	 * Wraps prompt assembly in a per-turn trace, so every harness record emitted
+	 * while the prompt is built shares one `traceId`.
+	 */
 	private async getSystemPrompt(): Promise<string> {
+		return harnessLogger(this.harnessLogger).runWithContext({ traceId: crypto.randomUUID() }, () =>
+			this.buildSystemPrompt(),
+		)
+	}
+
+	private async buildSystemPrompt(): Promise<string> {
 		const taskContext = await this.getTaskContext()
 		const { taskState, artifactIssues } = await this.resolveTaskState(taskContext)
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
@@ -4227,53 +4251,111 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const mode = await this.getTaskMode()
 		const apiConfiguration = this.apiConfiguration
 
-		return await (async () => {
-			const provider = this.providerRef.deref()
+		return await harnessLogger(this.harnessLogger).runWithContext(
+			{ taskId: taskContext.taskId, txxId: taskState.currentTask, mode: mode ?? null },
+			async () => {
+				const provider = this.providerRef.deref()
 
-			if (!provider) {
-				throw new Error("Provider not available")
-			}
+				if (!provider) {
+					throw new Error("Provider not available")
+				}
 
-			const modelInfo = this.api.getModel().info
+				const modelInfo = this.api.getModel().info
 
-			return SYSTEM_PROMPT(
-				provider.context,
-				this.cwd,
-				false,
-				mcpHub,
-				this.diffStrategy,
-				mode ?? defaultModeSlug,
-				customModePrompts,
-				customModes,
-				customInstructions,
-				experiments,
-				language,
-				rooIgnoreInstructions,
-				{
-					todoListEnabled: apiConfiguration?.todoListEnabled ?? true,
-					useAgentRules:
-						vscode.workspace.getConfiguration(Package.name).get<boolean>("useAgentRules") ?? true,
-					enableSubfolderRules: enableSubfolderRules ?? false,
-					newTaskRequireTodos: vscode.workspace
-						.getConfiguration(Package.name)
-						.get<boolean>("newTaskRequireTodos", false),
-					isStealthModel: modelInfo?.isStealthModel,
-					taskContext,
-					taskState,
-					artifactValidationIssues: artifactIssues,
-				},
-				undefined, // todoList
-				this.api.getModel().id,
-				provider.getSkillsManager(),
-			)
-		})()
+				return SYSTEM_PROMPT(
+					provider.context,
+					this.cwd,
+					false,
+					mcpHub,
+					this.diffStrategy,
+					mode ?? defaultModeSlug,
+					customModePrompts,
+					customModes,
+					customInstructions,
+					experiments,
+					language,
+					rooIgnoreInstructions,
+					{
+						todoListEnabled: apiConfiguration?.todoListEnabled ?? true,
+						useAgentRules:
+							vscode.workspace.getConfiguration(Package.name).get<boolean>("useAgentRules") ?? true,
+						enableSubfolderRules: enableSubfolderRules ?? false,
+						newTaskRequireTodos: vscode.workspace
+							.getConfiguration(Package.name)
+							.get<boolean>("newTaskRequireTodos", false),
+						isStealthModel: modelInfo?.isStealthModel,
+						taskContext,
+						taskState,
+						artifactValidationIssues: artifactIssues,
+						// Full prompt logging is opt-in and redacted downstream.
+						harnessLogFullPrompts:
+							vscode.workspace
+								.getConfiguration(Package.name)
+								.get<boolean>("harnessLogFullPrompts", false) ?? false,
+					},
+					undefined, // todoList
+					this.api.getModel().id,
+					provider.getSkillsManager(),
+				)
+			},
+		)
 	}
 
 	public getTaskContext(): Promise<TaskContext> {
-		this.taskContextPromise ??=
-			this.parentTask?.getTaskContext() ?? this.taskResolver.resolve({ workspacePath: this.workspacePath })
+		this.taskContextPromise ??= this.resolveTaskContext()
 
 		return this.taskContextPromise
+	}
+
+	private async resolveTaskContext(): Promise<TaskContext> {
+		const logger = harnessLogger(this.harnessLogger)
+
+		return logger.span(
+			"harness.taskContext.resolve",
+			async (span) => {
+				const resolved = await (this.parentTask?.getTaskContext() ??
+					this.taskResolver.resolve({ workspacePath: this.workspacePath }))
+
+				span.annotate({
+					taskId: resolved.taskId,
+					branch: resolved.branch,
+					inheritedFromParent: Boolean(this.parentTask),
+				})
+
+				return resolved
+			},
+			{ attributes: { workspacePath: this.workspacePath } },
+		)
+	}
+
+	/**
+	 * Diagnostic hook for important transitions (mode switch): re-read the
+	 * canonical artifacts and compare them with a freshly resolved state.
+	 * Never mutates and never throws.
+	 */
+	public async reconcileHarnessState(phase: string): Promise<void> {
+		const logger = harnessLogger(this.harnessLogger)
+		let taskContext: TaskContext | undefined
+
+		try {
+			taskContext = await this.getTaskContext()
+			const taskState = await this.taskStateResolver.resolve(taskContext)
+
+			await this.stateReconciler.reconcile(taskContext, taskState, {
+				phase,
+				logger,
+				context: { taskId: taskContext.taskId, txxId: taskState.currentTask },
+			})
+		} catch (error) {
+			logger.event("harness.state.reconcile.failed", {
+				level: "warn",
+				context: { taskId: taskContext?.taskId ?? null },
+				attributes: {
+					phase,
+					error: error instanceof Error ? error.message : String(error),
+				},
+			})
+		}
 	}
 
 	/**
@@ -4288,44 +4370,90 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private async resolveTaskState(
 		taskContext: TaskContext,
 	): Promise<{ taskState: TaskState; artifactIssues: ArtifactValidationIssue[] }> {
-		const artifactIssues: ArtifactValidationIssue[] = []
-		let taskState: TaskState
+		const logger = harnessLogger(this.harnessLogger)
 
-		try {
-			taskState = await this.taskStateResolver.resolve(taskContext)
-		} catch (error) {
-			if (!(error instanceof TaskStateError)) {
-				throw error
-			}
+		return logger.span(
+			"harness.resolveTaskState",
+			async (span) => {
+				const artifactIssues: ArtifactValidationIssue[] = []
+				let taskState: TaskState
+				let readmeRejected = false
 
-			// A malformed README must not break prompt generation: report the problem
-			// and let the model repair the canonical block.
-			artifactIssues.push({
-				severity: "error",
-				code: "invalid-task-state",
-				taskId: null,
-				message: error.message,
-			})
-			taskState = {
-				taskId: taskContext.taskId,
-				status: "ANALYSIS",
-				currentTask: null,
-				currentTaskArtifact: null,
-			}
-		}
+				try {
+					taskState = await this.taskStateResolver.resolve(taskContext)
+				} catch (error) {
+					if (!(error instanceof TaskStateError)) {
+						throw error
+					}
 
-		const report = await this.artifactValidator.validate(taskContext, { status: taskState.status })
-		artifactIssues.push(...report.issues)
+					// A malformed README must not break prompt generation: report the problem
+					// and let the model repair the canonical block.
+					readmeRejected = true
+					artifactIssues.push({
+						severity: "error",
+						code: "invalid-task-state",
+						taskId: null,
+						message: error.message,
+					})
+					taskState = {
+						taskId: taskContext.taskId,
+						status: "ANALYSIS",
+						currentTask: null,
+						currentTaskArtifact: null,
+					}
+				}
 
-		if (report.valid) {
-			const assignment = await this.taskScheduler.assignNext(taskContext, taskState)
+				const report = await this.artifactValidator.validate(taskContext, { status: taskState.status })
+				artifactIssues.push(...report.issues)
 
-			if (assignment) {
-				taskState = assignment.state
-			}
-		}
+				let assigned = false
 
-		return { taskState, artifactIssues }
+				if (report.valid) {
+					const assignment = await this.taskScheduler.assignNext(taskContext, taskState)
+
+					if (assignment) {
+						taskState = assignment.state
+						assigned = true
+					}
+				}
+
+				span.annotate({
+					status: taskState.status,
+					currentTask: taskState.currentTask,
+					artifactsValid: report.valid,
+					artifactIssueCount: artifactIssues.length,
+					assigned,
+					readmeRejected,
+				})
+
+				// Diagnostic only: compare the runtime view with the canonical artifacts
+				// after a transition. The reconciler never mutates and never throws.
+				if (assigned || readmeRejected) {
+					const phase = assigned ? "scheduler.assignNext" : "taskState.fallback"
+
+					try {
+						await this.stateReconciler.reconcile(taskContext, taskState, {
+							phase,
+							logger,
+							context: { taskId: taskContext.taskId, txxId: taskState.currentTask },
+						})
+					} catch (error) {
+						// A failing diagnostic must not change the outcome it observes.
+						logger.event("harness.state.reconcile.failed", {
+							level: "warn",
+							context: { taskId: taskContext.taskId },
+							attributes: {
+								phase,
+								error: error instanceof Error ? error.message : String(error),
+							},
+						})
+					}
+				}
+
+				return { taskState, artifactIssues }
+			},
+			{ context: { taskId: taskContext.taskId } },
+		)
 	}
 
 	private getCurrentProfileId(state: any): string {

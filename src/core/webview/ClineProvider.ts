@@ -68,6 +68,7 @@ import {
 import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTaskCosts"
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
+import { harnessLogger } from "@roo-code/core"
 
 import { Package } from "../../shared/package"
 import { findLast } from "../../shared/array"
@@ -179,6 +180,26 @@ function scheduleTask(
 	void scheduler
 		.schedule(task, run)
 		.catch((error) => console.error(`[${source}] taskScheduler.schedule failed:`, error))
+}
+
+/**
+ * Best-effort harness reconciliation after an important transition.
+ *
+ * The reconciliation is diagnostic only: it must never affect the transition it
+ * observes, and test doubles for `Task` may not implement it at all.
+ */
+async function runHarnessReconciliation(task: Task, phase: string): Promise<void> {
+	const reconcile = (task as { reconcileHarnessState?: (phase: string) => Promise<void> }).reconcileHarnessState
+
+	if (typeof reconcile !== "function") {
+		return
+	}
+
+	try {
+		await reconcile.call(task, phase)
+	} catch {
+		// The reconciler logs its own failures; a diagnostic must not surface here.
+	}
 }
 
 type GetStateOptions = {
@@ -1735,6 +1756,7 @@ export class ClineProvider
 		signal?: AbortSignal,
 	): Promise<void> {
 		const task = targetTask
+		const previousMode = this.getGlobalState("mode") ?? null
 
 		if (task) {
 			TelemetryService.instance.captureModeSwitch(task.taskId, newMode)
@@ -1767,6 +1789,22 @@ export class ClineProvider
 		await this.updateGlobalState("mode", newMode)
 
 		this.emit(RooCodeEventName.ModeChanged, newMode)
+
+		harnessLogger().event("harness.mode.transition", {
+			context: { taskId: task?.taskId ?? null, mode: newMode },
+			attributes: {
+				fromMode: previousMode,
+				toMode: newMode,
+				reason: "handleModeSwitch",
+				taskScoped: Boolean(task),
+			},
+		})
+
+		// Diagnostic only: a mode transition is a good moment to verify that the
+		// runtime view still matches the canonical task artifacts.
+		if (task) {
+			await runHarnessReconciliation(task, "mode.transition")
+		}
 
 		// If workspace lock is on, keep the current API config — don't load mode-specific config
 		const lockApiConfigAcrossModes = this.context.workspaceState.get("lockApiConfigAcrossModes", false)
