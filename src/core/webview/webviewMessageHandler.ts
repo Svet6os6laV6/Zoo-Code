@@ -3923,6 +3923,10 @@ export const webviewMessageHandler = async (
 				taskId: currentTask.taskId,
 				globalStoragePath: provider.contextProxy.globalStorageUri.fsPath,
 				values: message.values,
+				// The webview only knows the ask text; the concrete tool rejections
+				// live on the task, so read them here rather than widening the
+				// webview message contract.
+				toolErrors: currentTask.getRecentToolErrors(),
 				log: (msg) => provider.log(msg),
 			})
 			break

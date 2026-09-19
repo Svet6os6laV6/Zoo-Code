@@ -15,6 +15,7 @@ describe("skillTool", () => {
 		mockSkillsManager = {
 			getSkillContent: vi.fn(),
 			getSkillsForMode: vi.fn().mockReturnValue([]),
+			getSkillsMetadata: vi.fn().mockReturnValue([]),
 		}
 
 		mockTask = {
@@ -96,6 +97,36 @@ describe("skillTool", () => {
 
 		expect(mockCallbacks.pushToolResult).toHaveBeenCalledWith(
 			formatResponse.toolError("Skill 'non-existent' not found. Available skills: (none)"),
+		)
+	})
+
+	it("should direct mode-restricted skills to their allowed mode", async () => {
+		const block: ToolUse<"skill"> = {
+			type: "tool_use" as const,
+			name: "skill" as const,
+			params: {},
+			partial: false,
+			nativeArgs: {
+				skill: "qa-scope",
+			},
+		}
+
+		mockTask.providerRef.deref = vi.fn().mockReturnValue({
+			getState: vi.fn().mockResolvedValue({ mode: "orchestrator" }),
+			getSkillsManager: vi.fn().mockReturnValue(mockSkillsManager),
+		})
+		mockSkillsManager.getSkillContent.mockResolvedValue(null)
+		mockSkillsManager.getSkillsMetadata.mockReturnValue([
+			{ name: "qa-scope", modeSlugs: ["qa"], source: "project" },
+		])
+
+		await skillTool.handle(mockTask as Task, block, mockCallbacks)
+
+		expect(mockCallbacks.pushToolResult).toHaveBeenCalledWith(
+			formatResponse.toolError(
+				"Skill 'qa-scope' is unavailable in orchestrator mode. It is available in: qa. " +
+					"Switch mode or delegate with new_task before invoking it.",
+			),
 		)
 	})
 

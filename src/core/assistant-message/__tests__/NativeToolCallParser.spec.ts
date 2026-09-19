@@ -92,6 +92,38 @@ describe("NativeToolCallParser", () => {
 				}
 			})
 
+			it("should drop indentation params when mode is not indentation", () => {
+				// Models commonly echo a default-filled indentation object next to
+				// mode "slice"; it is meaningless there and must not be forwarded.
+				const toolCall = {
+					id: "toolu_456",
+					name: "read_file" as const,
+					arguments: JSON.stringify({
+						path: "src/utils.ts",
+						mode: "slice",
+						offset: 1,
+						limit: 200,
+						indentation: {
+							anchor_line: 1,
+							max_levels: 0,
+							max_lines: 0,
+							include_siblings: false,
+							include_header: false,
+						},
+					}),
+				}
+
+				const result = NativeToolCallParser.parseToolCall(toolCall)
+
+				expect(result).not.toBeNull()
+				expect(result?.type).toBe("tool_use")
+				if (result?.type === "tool_use") {
+					const nativeArgs = result.nativeArgs as { mode?: string; indentation?: unknown }
+					expect(nativeArgs.mode).toBe("slice")
+					expect(nativeArgs.indentation).toBeUndefined()
+				}
+			})
+
 			// Legacy format backward compatibility tests
 			describe("legacy format backward compatibility", () => {
 				it("should parse legacy files array format with single file", () => {

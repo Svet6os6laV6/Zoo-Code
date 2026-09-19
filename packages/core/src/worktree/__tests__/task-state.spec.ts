@@ -1,6 +1,6 @@
 import * as path from "path"
 
-import { TaskStateError, TaskStateResolver } from "../task-state.js"
+import { TASK_STATUS_TRANSITIONS, TaskStateError, TaskStateResolver, isTaskStatusTransition } from "../task-state.js"
 import type { TaskContext } from "../task-resolver.js"
 
 const taskContext: TaskContext = {
@@ -105,5 +105,27 @@ Current Task: NONE
 
 	it("accepts an implementation self-transition", () => {
 		expect(TaskStateResolver.transition("IMPLEMENTATION", "IMPLEMENTATION")).toBe("IMPLEMENTATION")
+	})
+
+	it.each([
+		["READY_FOR_REVIEW", "REVIEW_PASSED"],
+		["REVIEW", "REVIEW_PASSED"],
+		["REVIEW_PASSED", "DONE"],
+		["REVIEW", "READY_FOR_REVIEW"],
+		["REFACTOR", "READY_FOR_REFACTOR"],
+		["QA_READY", "REVIEW_PASSED"],
+	] as const)("accepts the %s -> %s edge the lifecycle stages rely on", (current, next) => {
+		expect(TaskStateResolver.transition(current, next)).toBe(next)
+		expect(isTaskStatusTransition(current, next)).toBe(true)
+	})
+
+	it("reports a rejected edge without throwing", () => {
+		expect(isTaskStatusTransition("DONE", "IMPLEMENTATION")).toBe(false)
+	})
+
+	it("documents the remediation markers as edges out of their own stage", () => {
+		expect(TASK_STATUS_TRANSITIONS.REVIEW).toContain("READY_FOR_REVIEW")
+		expect(TASK_STATUS_TRANSITIONS.REFACTOR).toContain("READY_FOR_REFACTOR")
+		expect(TASK_STATUS_TRANSITIONS.QA_READY).toContain("REVIEW_PASSED")
 	})
 })

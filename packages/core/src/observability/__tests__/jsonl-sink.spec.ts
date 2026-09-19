@@ -49,7 +49,15 @@ function record(name: string, payload: string = "x".repeat(80)): HarnessLogRecor
 		name,
 		level: "info",
 		timestamp: "2026-01-01T00:00:00.000Z",
-		context: { traceId: "trace-1", sessionId: "session-1", taskId: null, txxId: null, mode: null },
+		context: {
+			traceId: "trace-1",
+			spanId: "span-1",
+			sessionId: "session-1",
+			taskId: null,
+			agentTaskId: null,
+			txxId: null,
+			mode: null,
+		},
 		attributes: { payload },
 	}
 }

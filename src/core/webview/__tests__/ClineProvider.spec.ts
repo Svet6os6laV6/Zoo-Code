@@ -30,6 +30,8 @@ import { ContextProxy } from "../../config/ContextProxy"
 import { Task, TaskOptions } from "../../task/Task"
 import { safeWriteJson } from "../../../utils/safeWriteJson"
 
+import { HarnessLogger, resetRootHarnessLogger, setRootHarnessLogger, type HarnessLogRecord } from "@roo-code/core"
+
 import { ClineProvider } from "../ClineProvider"
 import { webviewMessageHandler } from "../webviewMessageHandler"
 import { Terminal } from "../../../integrations/terminal/Terminal"
@@ -2446,6 +2448,53 @@ describe("ClineProvider", () => {
 
 			// Verify state was posted to webview
 			expect(mockPostMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "state" }))
+		})
+
+		test("emits mode.transition with the bound harness context, not the agent task id", async () => {
+			const records: HarnessLogRecord[] = []
+			setRootHarnessLogger(
+				new HarnessLogger({
+					sinks: [
+						{
+							name: "recording",
+							write: (record) => {
+								records.push(record)
+							},
+						},
+					],
+				}),
+			)
+
+			try {
+				const taskDouble = {
+					taskId: "01a0a924-1111-2222-3333-444455556666",
+					emit: vi.fn(),
+					getHarnessLogContext: vi.fn().mockResolvedValue({
+						traceId: "lifecycle-trace",
+						taskId: "SITESUP-1118",
+						agentTaskId: "01a0a924-1111-2222-3333-444455556666",
+						mode: "code",
+					}),
+				}
+
+				await provider.handleModeSwitch("architect", taskDouble as unknown as Task)
+
+				const record = records.find((entry) => entry.name === "harness.mode.transition")
+
+				expect(record).toBeDefined()
+				expect(record?.context).toMatchObject({
+					traceId: "lifecycle-trace",
+					taskId: "SITESUP-1118",
+					agentTaskId: taskDouble.taskId,
+					mode: "architect",
+				})
+				// The regression: the record used to carry the unbound trace and the
+				// internal agent task UUID in place of the harness task id.
+				expect(record?.context.traceId).not.toBe("unbound-trace")
+				expect(record?.context.taskId).not.toBe(taskDouble.taskId)
+			} finally {
+				resetRootHarnessLogger()
+			}
 		})
 	})
 

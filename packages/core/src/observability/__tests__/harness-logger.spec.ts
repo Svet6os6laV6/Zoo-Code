@@ -28,14 +28,14 @@ describe("HarnessLogger", () => {
 		resetRootHarnessLogger()
 	})
 
-	it("records an event with the resolved context", () => {
+	it("records an event with the resolved context and mints an operation span id", () => {
 		const sink = recordingSink()
 		const logger = new HarnessLogger({ sinks: [sink], clock, context: { sessionId: "session-1", mode: "code" } })
 
 		logger.event("harness.test", { attributes: { phase: "start" } })
 
 		expect(sink.records).toHaveLength(1)
-		expect(sink.records[0]).toEqual({
+		expect(sink.records[0]).toMatchObject({
 			kind: "event",
 			name: "harness.test",
 			level: "info",
@@ -44,11 +44,14 @@ describe("HarnessLogger", () => {
 				traceId: "unbound-trace",
 				sessionId: "session-1",
 				taskId: null,
+				agentTaskId: null,
 				txxId: null,
 				mode: "code",
 			},
 			attributes: { phase: "start" },
 		})
+		// A record emitted outside any span still identifies one operation.
+		expect(typeof sink.records[0]?.context.spanId).toBe("string")
 	})
 
 	it("resolves context from ambient, bound, and per-call sources in that precedence order", () => {
@@ -62,10 +65,11 @@ describe("HarnessLogger", () => {
 
 		logger.event("harness.after")
 
-		expect(sink.records[0]?.context).toEqual({
+		expect(sink.records[0]?.context).toMatchObject({
 			traceId: "trace-1",
 			sessionId: "session-1",
 			taskId: "SITESUP-1116",
+			agentTaskId: null,
 			txxId: "T02",
 			mode: null,
 		})
@@ -148,6 +152,35 @@ describe("HarnessLogger", () => {
 			attributes: { taskCount: 3 },
 		})
 		expect(typeof sink.records[0]?.durationMs).toBe("number")
+	})
+
+	it("binds one operation span id to the span and to every record inside it", async () => {
+		const sink = recordingSink()
+		const logger = new HarnessLogger({ sinks: [sink], clock })
+
+		await logger.span("harness.txx.parse", async () => {
+			logger.event("harness.inside.span")
+		})
+
+		const spanRecord = sink.records.find((record) => record.kind === "span")
+		const innerRecord = sink.records.find((record) => record.name === "harness.inside.span")
+
+		expect(typeof spanRecord?.context.spanId).toBe("string")
+		expect(innerRecord?.context.spanId).toBe(spanRecord?.context.spanId)
+	})
+
+	it("keeps one trace across operations while giving each operation its own span id", async () => {
+		const sink = recordingSink()
+		const logger = new HarnessLogger({ sinks: [sink], clock, context: { traceId: "trace-1" } })
+
+		await logger.span("harness.operation.one", () => undefined)
+		await logger.span("harness.operation.two", () => undefined)
+
+		const [first, second] = sink.records
+
+		expect(first?.context.traceId).toBe("trace-1")
+		expect(second?.context.traceId).toBe("trace-1")
+		expect(first?.context.spanId).not.toBe(second?.context.spanId)
 	})
 
 	it("records a failed span and rethrows the original error", async () => {

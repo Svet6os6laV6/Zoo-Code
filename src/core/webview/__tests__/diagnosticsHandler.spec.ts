@@ -44,6 +44,8 @@ vi.mock("fs/promises", () => {
 	}
 })
 
+import { providerIdentifiers } from "@roo-code/types"
+
 import * as vscode from "vscode"
 import * as fs from "fs/promises"
 import * as fsUtils from "../../../utils/fs"
@@ -168,6 +170,51 @@ describe("generateErrorDiagnostics", () => {
 		// Verify empty history in output
 		const [, writtenContent] = vi.mocked(fs.writeFile).mock.calls[0]
 		expect(String(writtenContent)).toContain('"history": []')
+	})
+
+	it("includes recorded tool errors in the diagnostics payload", async () => {
+		vi.mocked(fsUtils.fileExistsAtPath).mockResolvedValue(false)
+
+		const result = await generateErrorDiagnostics({
+			taskId: "test-task-id",
+			globalStoragePath: "/mock/global/storage",
+			values: {
+				timestamp: "2025-01-01T00:00:00.000Z",
+				version: "1.2.3",
+				provider: providerIdentifiers.openrouter,
+				model: "deepseek/deepseek-v4.1-flash",
+				details: "guidance",
+			},
+			toolErrors: [
+				{
+					tool: "read_file",
+					error: 'Tool "read_file" is not allowed in orchestrator mode.',
+					timestamp: 1_700_000_000_000,
+				},
+			],
+			log: mockLog,
+		})
+
+		expect(result.success).toBe(true)
+
+		const [, writtenContent] = vi.mocked(fs.writeFile).mock.calls[0]
+		const content = String(writtenContent)
+		expect(content).toContain('"toolErrors"')
+		expect(content).toContain('"tool": "read_file"')
+		expect(content).toContain("not allowed in orchestrator mode")
+	})
+
+	it("omits toolErrors when the task recorded none", async () => {
+		vi.mocked(fsUtils.fileExistsAtPath).mockResolvedValue(false)
+
+		await generateErrorDiagnostics({
+			taskId: "test-task-id",
+			globalStoragePath: "/mock/global/storage",
+			log: mockLog,
+		})
+
+		const [, writtenContent] = vi.mocked(fs.writeFile).mock.calls[0]
+		expect(String(writtenContent)).not.toContain('"toolErrors"')
 	})
 
 	it("returns error result when file write fails", async () => {

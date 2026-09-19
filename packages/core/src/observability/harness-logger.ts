@@ -10,11 +10,17 @@
  *   length check per call.
  * - Context is resolved from three sources, in increasing precedence: the
  *   ambient context (`runWithContext`), the logger's bound context (`child`),
- *   and per-call overrides. The ambient context exists so a per-turn `traceId`
+ *   and per-call overrides. The ambient context exists so a lifecycle `traceId`
  *   reaches harness internals without threading it through every signature.
+ * - `traceId` identifies the whole task lifecycle; `spanId` identifies one
+ *   operation. `span()` binds a fresh `spanId` to its body so every record
+ *   emitted while an operation runs carries the same operation id, and `emit()`
+ *   mints one for records emitted outside any span. A trace therefore reads as
+ *   one lifecycle ordered into operations instead of one trace per turn.
  */
 
 import { AsyncLocalStorage } from "async_hooks"
+import { randomUUID } from "crypto"
 
 import { redactRecord } from "./redaction.js"
 import {
@@ -35,10 +41,19 @@ import {
 	type HarnessSpanOptions,
 } from "./types.js"
 
+/**
+ * Last-resort values for records emitted before a lifecycle is bound.
+ *
+ * `unbound-trace` is a diagnostic marker: a record carrying it was written
+ * outside any `runWithContext`, so its trace cannot be reconstructed. Callers
+ * that own a task must bind `traceId` explicitly instead of relying on this.
+ */
 const DEFAULT_CONTEXT: HarnessLogContext = {
 	traceId: "unbound-trace",
+	spanId: null,
 	sessionId: "unbound-session",
 	taskId: null,
+	agentTaskId: null,
 	txxId: null,
 	mode: null,
 }
@@ -53,8 +68,10 @@ const ambientContext = new AsyncLocalStorage<HarnessLogContextInput>()
 
 type MutableContext = {
 	traceId: string
+	spanId: string | null
 	sessionId: string
 	taskId: string | null
+	agentTaskId: string | null
 	txxId: string | null
 	mode: string | null
 }
@@ -69,11 +86,17 @@ function mergeContext(...parts: readonly (HarnessLogContextInput | undefined)[])
 		if (part.traceId !== undefined) {
 			merged.traceId = part.traceId
 		}
+		if (part.spanId !== undefined) {
+			merged.spanId = part.spanId
+		}
 		if (part.sessionId !== undefined) {
 			merged.sessionId = part.sessionId
 		}
 		if (part.taskId !== undefined) {
 			merged.taskId = part.taskId
+		}
+		if (part.agentTaskId !== undefined) {
+			merged.agentTaskId = part.agentTaskId
 		}
 		if (part.txxId !== undefined) {
 			merged.txxId = part.txxId
@@ -193,7 +216,10 @@ export class HarnessLogger implements HarnessLoggerPort {
 	): Promise<T> {
 		const startedAt = this.clock().getTime()
 		const attributes: Record<string, unknown> = { ...(options.attributes ?? {}) }
-		const context = this.resolveContext(options.context)
+		// One span id per operation: bound to the body so every nested record
+		// shares it, and reused for the span record itself.
+		const spanContext: HarnessLogContextInput = { ...(options.context ?? {}), spanId: randomUUID() }
+		const context = this.resolveContext(spanContext)
 		const handle: HarnessSpanHandle = {
 			context,
 			annotate: (extra) => {
@@ -207,7 +233,7 @@ export class HarnessLogger implements HarnessLoggerPort {
 				name,
 				level: options.level ?? (status === "error" ? "error" : "info"),
 				timestamp: this.timestamp(),
-				context: this.resolveContext(options.context),
+				context: this.resolveContext(spanContext),
 				durationMs: Math.max(0, this.clock().getTime() - startedAt),
 				status,
 				...(Object.keys(attributes).length > 0 ? { attributes } : {}),
@@ -216,7 +242,9 @@ export class HarnessLogger implements HarnessLoggerPort {
 		}
 
 		try {
-			const result = await run(handle)
+			const result = await ambientContext.run(mergeContext(ambientContext.getStore(), spanContext), () =>
+				run(handle),
+			)
 			complete("ok")
 			return result
 		} catch (error) {
@@ -258,14 +286,20 @@ export class HarnessLogger implements HarnessLoggerPort {
 			return
 		}
 
-		let payload = record
+		// Every record is one operation, so every record gets a span id: the one
+		// bound by the enclosing span, or a fresh one for a top-level record.
+		const identified: HarnessLogRecord = record.context.spanId
+			? record
+			: { ...record, context: { ...record.context, spanId: randomUUID() } }
+
+		let payload = identified
 		if (this.redactPayloads) {
 			try {
-				payload = redactRecord(record)
+				payload = redactRecord(identified)
 			} catch {
 				// A payload the redactor cannot walk is still worth logging unredacted
 				// only if it is not a prompt; the prompt path redacts explicitly.
-				payload = record
+				payload = identified
 			}
 		}
 

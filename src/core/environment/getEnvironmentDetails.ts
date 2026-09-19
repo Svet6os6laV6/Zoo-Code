@@ -213,7 +213,12 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 		language,
 	} = state ?? {}
 
-	const currentMode = mode ?? defaultModeSlug
+	// Prefer the task's own mode over the provider's. Provider state is shared across
+	// tasks, so a delegated child task (for example a harness stage launched in `code`
+	// while the parent orchestrator is open) would otherwise be told it is running in
+	// the parent's mode. The system prompt already resolves the task-local mode, so
+	// reading provider state here made the two disagree.
+	const currentMode = (await cline.getTaskMode()) || mode || defaultModeSlug
 
 	const modeDetails = await getFullModeDetails(currentMode, customModes, customModePrompts, {
 		cwd: cline.cwd,

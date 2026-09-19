@@ -23,17 +23,29 @@ export const HARNESS_LOG_LEVEL_RANK: Readonly<Record<HarnessLogLevel, number>> =
 }
 
 /**
- * Identity of a harness run.
+ * Correlation identity of a harness record.
  *
- * `taskId` is the durable harness task (for example `SITESUP-1116`), `txxId` the
- * implementation unit currently in play (for example `T02`), and `mode` the mode
- * slug that produced the decision. `txxId` and `mode` are optional because not
- * every layer knows them.
+ * Two independent axes are kept apart on purpose:
+ *
+ * - `traceId` is the durable lifecycle of one harness task. It is generated once
+ *   per task run (when the task identity is first resolved) and never changes, so
+ *   a single filter reconstructs `Architect -> Code T01 -> DONE -> T02 -> ...`.
+ * - `spanId` is the one operation currently in flight (`parser.read`,
+ *   `scheduler.assignNext`, one prompt assembly, one LLM request). It is bound by
+ *   `HarnessLogger.span()` for the span body and generated per record otherwise.
+ *
+ * `taskId` is the durable harness task (for example `SITESUP-1116`) and is
+ * deliberately *not* the internal agent task UUID; that one lives in
+ * `agentTaskId` (for example `01a0a924-...`) so harness records are never keyed
+ * by an opaque per-instance id. `txxId` is the implementation unit in play
+ * (for example `T02`) and `mode` the mode slug that produced the decision.
  */
 export type HarnessLogContext = {
 	readonly traceId: string
+	readonly spanId: string | null
 	readonly sessionId: string
 	readonly taskId: string | null
+	readonly agentTaskId: string | null
 	readonly txxId: string | null
 	readonly mode: string | null
 }

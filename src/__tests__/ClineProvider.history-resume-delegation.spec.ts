@@ -39,6 +39,14 @@ vi.mock("@roo-code/telemetry", () => ({
 	},
 }))
 
+const runHarnessLifecycle = vi.hoisted(() => vi.fn().mockResolvedValue(null))
+
+vi.mock("../core/harness/mode-runner", () => ({
+	HarnessModeRunner: class {
+		run = runHarnessLifecycle
+	},
+}))
+
 // Mock persistence BEFORE importing provider
 vi.mock("../core/task-persistence/taskMessages", () => ({
 	readTaskMessages: vi.fn().mockResolvedValue([]),
@@ -123,9 +131,59 @@ function makeStatefulTaskHistoryStore(...items: HistoryItem[]) {
 	}
 }
 
+// allow: SIZE_OK — scenario matrix for one persisted delegation boundary.
 describe("History resume delegation - parent metadata transitions", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+		runHarnessLifecycle.mockResolvedValue(null)
+	})
+
+	it("starts the controller-selected mode instead of resuming the orchestrator", async () => {
+		const parentItem = {
+			id: "parent-lifecycle",
+			status: "delegated",
+			awaitingChildId: "child-reviewer",
+			childIds: ["child-reviewer"],
+			ts: 100,
+			task: "Parent lifecycle task",
+			tokensIn: 0,
+			tokensOut: 0,
+			totalCost: 0,
+		}
+		const childItem = { id: "child-reviewer", status: "active", mode: "reviewer" }
+		const taskHistoryStore = makeTaskHistoryStoreStub(childItem, parentItem)
+		const parentInstance = {
+			taskId: parentItem.id,
+			resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+			overwriteClineMessages: vi.fn().mockResolvedValue(undefined),
+			overwriteApiConversationHistory: vi.fn().mockResolvedValue(undefined),
+		}
+		let currentTask: object | undefined = { taskId: childItem.id }
+		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
+		const provider = makeProviderStub({
+			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
+			getCurrentTask: vi.fn(() => currentTask),
+			removeClineFromStack: vi.fn(async () => {
+				currentTask = undefined
+			}),
+			createTaskWithHistoryItem: vi.fn(async () => (currentTask = parentInstance)),
+			emit: vi.fn(),
+			taskHistoryStore,
+			taskScheduler: { schedule },
+		})
+		runHarnessLifecycle.mockResolvedValueOnce({ type: "started", mode: "qa", status: "REVIEW_PASSED" })
+
+		const result = await ClineProvider.prototype.reopenParentFromDelegation.call(provider, {
+			parentTaskId: parentItem.id,
+			childTaskId: childItem.id,
+			completionResultSummary: "Stage Result: PASSED",
+		})
+
+		expect(result).toBe(true)
+		expect(runHarnessLifecycle).toHaveBeenCalledWith(parentInstance, "reviewer", "Stage Result: PASSED")
+		expect(schedule).not.toHaveBeenCalled()
+		expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
 	})
 
 	it("rejects a stale restored completion action before changing parent or child state", async () => {

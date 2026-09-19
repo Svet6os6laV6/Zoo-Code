@@ -51,17 +51,27 @@ export class SkillTool extends BaseTool<"skill"> {
 			const skillContent = await resolveSkillContentForMode(skillsManager, skillName, currentMode)
 
 			if (!skillContent) {
+				const allowedModes = Array.from(
+					new Set(
+						skillsManager
+							.getSkillsMetadata()
+							.filter((skill) => skill.name === skillName)
+							.flatMap((skill) => skill.modeSlugs ?? []),
+					),
+				).sort()
+
 				// Get available skills for error message
 				const availableSkills = skillsManager.getSkillsForMode(currentMode)
 				const skillNames = availableSkills.map((s) => s.name)
 
 				task.recordToolError("skill")
 				task.didToolFailInCurrentTurn = true
-				pushToolResult(
-					formatResponse.toolError(
-						`Skill '${skillName}' not found. Available skills: ${skillNames.join(", ") || "(none)"}`,
-					),
-				)
+				const error =
+					allowedModes.length > 0
+						? `Skill '${skillName}' is unavailable in ${currentMode} mode. It is available in: ${allowedModes.join(", ")}. Switch mode or delegate with new_task before invoking it.`
+						: `Skill '${skillName}' not found. Available skills: ${skillNames.join(", ") || "(none)"}`
+
+				pushToolResult(formatResponse.toolError(error))
 				return
 			}
 

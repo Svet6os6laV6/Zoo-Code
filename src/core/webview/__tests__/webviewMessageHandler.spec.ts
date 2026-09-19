@@ -243,7 +243,7 @@ import * as fsUtils from "../../../utils/fs"
 import { getWorkspacePath } from "../../../utils/path"
 import { ensureSettingsDirectoryExists } from "../../../utils/globalContext"
 import { generateErrorDiagnostics } from "../diagnosticsHandler"
-import type { ModeConfig } from "@roo-code/types"
+import type { ModeConfig, WebviewMessage } from "@roo-code/types"
 
 vi.mock("../../../utils/fs")
 vi.mock("../../../utils/path")
@@ -1743,6 +1743,7 @@ describe("webviewMessageHandler - downloadErrorDiagnostics", () => {
 		// Provide a current task with a stable ID
 		vi.mocked(mockClineProvider.getCurrentTask).mockReturnValue({
 			taskId: "test-task-id",
+			getRecentToolErrors: vi.fn().mockReturnValue([]),
 		} as any)
 	})
 
@@ -1770,8 +1771,37 @@ describe("webviewMessageHandler - downloadErrorDiagnostics", () => {
 				model: "test-model",
 				details: "Sample error details",
 			},
+			toolErrors: [],
 			log: expect.any(Function),
 		})
+	})
+
+	it("forwards the task's recorded tool errors to the diagnostics file", async () => {
+		const toolErrors = [
+			{
+				tool: "read_file",
+				error: 'Tool "read_file" is not allowed in orchestrator mode.',
+				timestamp: 1_700_000_000_000,
+			},
+		]
+		vi.mocked(mockClineProvider.getCurrentTask).mockReturnValue({
+			taskId: "test-task-id",
+			getRecentToolErrors: vi.fn().mockReturnValue(toolErrors),
+		} as unknown as ReturnType<ClineProvider["getCurrentTask"]>)
+
+		const message: WebviewMessage = {
+			type: "downloadErrorDiagnostics",
+			values: { details: "guidance" },
+		}
+
+		await webviewMessageHandler(mockClineProvider, message)
+
+		expect(generateErrorDiagnostics).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskId: "test-task-id",
+				toolErrors,
+			}),
+		)
 	})
 
 	it("shows error when no active task", async () => {

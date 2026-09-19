@@ -20,8 +20,10 @@ function record(overrides: Partial<HarnessLogRecord> = {}): HarnessLogRecord {
 		timestamp: "2026-01-01T00:00:00.000Z",
 		context: {
 			traceId: "trace-1",
+			spanId: "span-1",
 			sessionId: "session-1",
 			taskId: "SITESUP-1116",
+			agentTaskId: "01a0a924-0000-0000-0000-000000000000",
 			txxId: "T02",
 			mode: "code",
 		},

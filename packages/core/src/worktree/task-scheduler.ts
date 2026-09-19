@@ -18,11 +18,11 @@
  */
 
 import { promises as fs } from "fs"
-import * as path from "path"
 
 import { harnessLogger } from "../observability/harness-logger.js"
 import type { HarnessLoggerPort } from "../observability/types.js"
 
+import { readCanonicalFields, readmePath, writeCanonicalFields, writeReadmeAtomic } from "./task-readme.js"
 import type { TaskContext } from "./task-resolver.js"
 import type { TaskState } from "./task-state.js"
 import {
@@ -55,26 +55,6 @@ export type TaskAssignment = {
 	readonly state: TaskState
 	/** Implementation unit that was replaced, when the previous one had finished. */
 	readonly replaced: string | null
-}
-
-/** Canonical README fields the scheduler owns, used for mutation records. */
-type CanonicalReadmeFields = {
-	readonly status: string | null
-	readonly currentTask: string | null
-	readonly nextStep: string | null
-}
-
-function readCanonicalFields(readme: string): CanonicalReadmeFields {
-	const read = (name: string): string | null => {
-		const prefix = `${name.toLowerCase()}:`
-		const line = readme.split(/\r?\n/).find((candidate) => candidate.trim().toLowerCase().startsWith(prefix))
-		if (!line) {
-			return null
-		}
-		return line.slice(line.indexOf(":") + 1).trim()
-	}
-
-	return { status: read("Status"), currentTask: read("Current Task"), nextStep: read("Next Step") }
 }
 
 export class TaskScheduler {
@@ -119,6 +99,11 @@ export class TaskScheduler {
 	/**
 	 * Assign the next ready implementation unit and persist it in the README.
 	 *
+	 * `artifacts` is the snapshot the caller already parsed. Passing it keeps the
+	 * scheduler on the same filesystem state the validator judged, instead of
+	 * re-reading `implementation/` and risking a decision made about a different
+	 * DAG than the one that was just validated.
+	 *
 	 * Returns `null` when no assignment is needed or possible:
 	 * - the lifecycle stage does not execute implementation units;
 	 * - the current unit is still `TODO`/`IN_PROGRESS` (resume, never reassign);
@@ -126,7 +111,11 @@ export class TaskScheduler {
 	 *   error the model must repair, not something to silently skip);
 	 * - no task is ready (a DAG conflict the model must resolve).
 	 */
-	async assignNext(context: TaskContext, state: TaskState): Promise<TaskAssignment | null> {
+	async assignNext(
+		context: TaskContext,
+		state: TaskState,
+		artifacts?: ImplementationArtifacts,
+	): Promise<TaskAssignment | null> {
 		const logger = harnessLogger(this.logger)
 		const input = {
 			status: state.status,
@@ -156,16 +145,16 @@ export class TaskScheduler {
 			)
 		}
 
-		const artifacts = await this.parser.read(context)
+		const snapshot = artifacts ?? (await this.parser.read(context))
 		const current = state.currentTask
-			? (artifacts.tasks.find((task) => task.id === state.currentTask) ?? null)
+			? (snapshot.tasks.find((task) => task.id === state.currentTask) ?? null)
 			: null
 
 		if (state.currentTask && !current) {
 			return skip(
 				`assigned implementation unit ${state.currentTask} is missing from implementation/`,
 				"current-unit-missing",
-				{ availableUnits: artifacts.tasks.map((task) => task.id) },
+				{ availableUnits: snapshot.tasks.map((task) => task.id) },
 			)
 		}
 
@@ -177,30 +166,30 @@ export class TaskScheduler {
 			)
 		}
 
-		const next = readyTasks(artifacts.tasks)[0]
+		const next = readyTasks(snapshot.tasks)[0]
 		if (!next) {
 			return skip(
 				"no implementation unit is ready; every pending unit has an unfinished dependency",
 				"no-ready-task",
-				{ pendingUnits: artifacts.tasks.filter((task) => task.status === "TODO").map((task) => task.id) },
+				{ pendingUnits: snapshot.tasks.filter((task) => task.status === "TODO").map((task) => task.id) },
 			)
 		}
 
 		const relativeArtifact = `implementation/${next.fileName}`
-		const readmePath = path.join(context.taskRoot, "README.md")
-		const readme = await this.fileSystem.readFile(readmePath, "utf8")
+		const readmeFilePath = readmePath(context.taskRoot)
+		const readme = await this.fileSystem.readFile(readmeFilePath, "utf8")
 		const updated = this.writeAssignment(readme, relativeArtifact, next.id)
 
 		if (updated === null) {
 			return skip(
 				"README has no canonical Status line; mutating an unrecognized layout is unsafe",
 				"readme-layout-unrecognized",
-				{ readmePath },
+				{ readmePath: readmeFilePath },
 			)
 		}
 
 		const stateBefore = readCanonicalFields(readme)
-		await this.writeAtomic(readmePath, updated)
+		await writeReadmeAtomic(this.fileSystem, readmeFilePath, updated)
 		const stateAfter = readCanonicalFields(updated)
 
 		const assignment: TaskAssignment = {
@@ -216,7 +205,7 @@ export class TaskScheduler {
 		}
 
 		logger.decision("harness.scheduler.assignNext", {
-			input: { ...input, readyUnits: readyTasks(artifacts.tasks).map((task) => task.id) },
+			input: { ...input, readyUnits: readyTasks(snapshot.tasks).map((task) => task.id) },
 			result: {
 				taskId: next.id,
 				relativeArtifact,
@@ -228,7 +217,7 @@ export class TaskScheduler {
 		})
 
 		logger.mutation("harness.scheduler.assignNext", {
-			target: readmePath,
+			target: readmeFilePath,
 			stateBefore,
 			stateAfter,
 			reason: `wrote the canonical assignment for ${next.id} into the task README`,
@@ -240,43 +229,15 @@ export class TaskScheduler {
 	}
 
 	/**
-	 * Rewrite the canonical README fields. Returns `null` when the README has no
-	 * canonical `Status` line, because mutating an unrecognized layout is unsafe.
+	 * Rewrite the canonical README fields through the shared block writer.
+	 * Returns `null` when the README has no canonical `Status` line, because
+	 * mutating an unrecognized layout is unsafe.
 	 */
 	private writeAssignment(readme: string, relativeArtifact: string, taskId: string): string | null {
-		const lines = readme.split(/\r?\n/)
-
-		const setField = (name: string, value: string): boolean => {
-			const prefix = `${name.toLowerCase()}:`
-			const index = lines.findIndex((line) => line.trim().toLowerCase().startsWith(prefix))
-			if (index === -1) {
-				return false
-			}
-			lines[index] = `${name}: ${value}`
-			return true
-		}
-
-		if (!setField("Status", "IMPLEMENTATION")) {
-			return null
-		}
-
-		if (!setField("Current Task", relativeArtifact)) {
-			const statusIndex = lines.findIndex((line) => line.trim().toLowerCase().startsWith("status:"))
-			lines.splice(statusIndex + 1, 0, `Current Task: ${relativeArtifact}`)
-		}
-
-		setField("Next Step", `Implement ${taskId} (${relativeArtifact}).`)
-
-		return lines.join("\n")
-	}
-
-	/**
-	 * Write through a temporary file so a concurrent reader never observes a
-	 * partially written README.
-	 */
-	private async writeAtomic(filePath: string, content: string): Promise<void> {
-		const temporary = `${filePath}.${process.pid}.tmp`
-		await this.fileSystem.writeFile(temporary, content, "utf8")
-		await this.fileSystem.rename(temporary, filePath)
+		return writeCanonicalFields(readme, {
+			Status: "IMPLEMENTATION",
+			"Current Task": relativeArtifact,
+			"Next Step": `Implement ${taskId} (${relativeArtifact}).`,
+		})
 	}
 }

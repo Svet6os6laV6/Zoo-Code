@@ -438,8 +438,15 @@ export class NativeToolCallParser {
 						mode: partialArgs.mode,
 						offset: this.coerceOptionalNumber(partialArgs.offset),
 						limit: this.coerceOptionalNumber(partialArgs.limit),
+						// `indentation` is only meaningful for indentation mode (the tool
+						// prompt states this). Models routinely echo a default-filled
+						// indentation object alongside mode "slice"; carrying it forward
+						// invites nonsense values (max_levels: 0, max_lines: 0) reaching
+						// execution, so it is normalized away here instead.
 						indentation:
-							partialArgs.indentation && typeof partialArgs.indentation === "object"
+							partialArgs.mode === "indentation" &&
+							partialArgs.indentation &&
+							typeof partialArgs.indentation === "object"
 								? {
 										anchor_line: this.coerceOptionalNumber(partialArgs.indentation.anchor_line),
 										max_levels: this.coerceOptionalNumber(partialArgs.indentation.max_levels),
@@ -769,8 +776,10 @@ export class NativeToolCallParser {
 							mode: args.mode,
 							offset: this.coerceOptionalNumber(args.offset),
 							limit: this.coerceOptionalNumber(args.limit),
+							// Mirrors the partial-block path above: indentation params are
+							// only attached when the call actually requests indentation mode.
 							indentation:
-								args.indentation && typeof args.indentation === "object"
+								args.mode === "indentation" && args.indentation && typeof args.indentation === "object"
 									? {
 											anchor_line: this.coerceOptionalNumber(args.indentation.anchor_line),
 											max_levels: this.coerceOptionalNumber(args.indentation.max_levels),

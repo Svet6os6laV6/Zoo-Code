@@ -4,7 +4,7 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import type { ToolName, ClineAsk, ToolProgressStatus } from "@roo-code/types"
 import { ConsecutiveMistakeError, TelemetryEventName } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
-import { customToolRegistry } from "@roo-code/core"
+import { customToolRegistry, harnessLogger } from "@roo-code/core"
 
 import { t } from "../../i18n"
 
@@ -718,6 +718,10 @@ export async function presentAssistantMessage(cline: Task) {
 				}
 			}
 
+			// Timed here, not in each handler: the harness records one call per
+			// model-issued tool invocation regardless of which handler ran.
+			const toolCallStartedAt = Date.now()
+
 			switch (block.name) {
 				case "write_to_file":
 					await checkpointSaveAndMark(cline)
@@ -959,6 +963,24 @@ export async function presentAssistantMessage(cline: Task) {
 					})
 					break
 				}
+			}
+
+			// Metadata-only record of the tool call itself, so the log reads
+			// `tool.call -> artifact.changed -> taskUnit.statusChanged` in order.
+			// Never the tool payload: params and results stay out of the harness log.
+			try {
+				const harnessContext = await cline.getHarnessLogContext()
+
+				harnessLogger().event("harness.tool.call", {
+					context: { ...harnessContext, txxId: null },
+					attributes: {
+						tool: block.name,
+						durationMs: Date.now() - toolCallStartedAt,
+						partial: Boolean(block.partial),
+					},
+				})
+			} catch {
+				// Observability must never break tool execution.
 			}
 
 			break

@@ -6,7 +6,7 @@ import type { HarnessLogLevel, HarnessLoggerPort } from "../observability/types.
 
 import type { TaskContext } from "./task-resolver.js"
 
-const TASK_STATUSES = [
+export const TASK_STATUSES = [
 	"ANALYSIS",
 	"READY_FOR_IMPLEMENTATION",
 	"IMPLEMENTATION",
@@ -33,16 +33,31 @@ type TaskStateFileSystem = {
 	readFile(filePath: string, encoding: "utf8"): Promise<string>
 }
 
-const TRANSITIONS = {
+/**
+ * The canonical README status machine — the single source of truth for which
+ * status may follow which.
+ *
+ * Every status the harness *writes* must appear as an edge here: `ModeRunner`
+ * only persists a decision after `LifecycleController` validated it against this
+ * table. A lifecycle rule that needs a new edge must add it here, which keeps the
+ * stage model and the canonical status model from drifting apart.
+ *
+ * Beyond the forward pipeline, three edges exist to close remediation loops:
+ * `REVIEW`, `REFACTOR`, and `QA_READY` are the "a fix pass is running" markers a
+ * failing stage writes, and each one returns to the entry status of the stage
+ * that requested the fix (`READY_FOR_REVIEW`, `READY_FOR_REFACTOR`,
+ * `REVIEW_PASSED`) so that stage re-verifies the fix.
+ */
+export const TASK_STATUS_TRANSITIONS = {
 	ANALYSIS: ["READY_FOR_IMPLEMENTATION", "IMPLEMENTATION", "BLOCKED"],
 	READY_FOR_IMPLEMENTATION: ["IMPLEMENTATION", "BLOCKED"],
 	IMPLEMENTATION: ["IMPLEMENTATION", "ANALYSIS", "READY_FOR_REFACTOR", "READY_FOR_REVIEW", "BLOCKED"],
-	READY_FOR_REFACTOR: ["REFACTOR", "BLOCKED"],
-	REFACTOR: ["IMPLEMENTATION", "READY_FOR_REVIEW", "BLOCKED"],
-	READY_FOR_REVIEW: ["REVIEW", "BLOCKED"],
-	REVIEW: ["IMPLEMENTATION", "REVIEW_PASSED", "BLOCKED"],
-	REVIEW_PASSED: ["IMPLEMENTATION", "QA_READY", "BLOCKED"],
-	QA_READY: ["IMPLEMENTATION", "DONE", "BLOCKED"],
+	READY_FOR_REFACTOR: ["REFACTOR", "READY_FOR_REVIEW", "BLOCKED"],
+	REFACTOR: ["IMPLEMENTATION", "READY_FOR_REFACTOR", "READY_FOR_REVIEW", "BLOCKED"],
+	READY_FOR_REVIEW: ["REVIEW", "REVIEW_PASSED", "BLOCKED"],
+	REVIEW: ["IMPLEMENTATION", "READY_FOR_REVIEW", "REVIEW_PASSED", "BLOCKED"],
+	REVIEW_PASSED: ["IMPLEMENTATION", "QA_READY", "DONE", "BLOCKED"],
+	QA_READY: ["IMPLEMENTATION", "REVIEW_PASSED", "DONE", "BLOCKED"],
 	DONE: [],
 	BLOCKED: [],
 } as const satisfies Record<TaskStatus, readonly TaskStatus[]>
@@ -213,10 +228,15 @@ export class TaskStateResolver {
 	}
 
 	static transition(current: TaskStatus, next: TaskStatus): TaskStatus {
-		if (!TRANSITIONS[current].some((status) => status === next)) {
+		if (!isTaskStatusTransition(current, next)) {
 			throw new TaskStateError(`Invalid task state transition: ${current} -> ${next}`)
 		}
 
 		return next
 	}
+}
+
+/** Non-throwing counterpart of {@link TaskStateResolver.transition}. */
+export function isTaskStatusTransition(current: TaskStatus, next: TaskStatus): boolean {
+	return TASK_STATUS_TRANSITIONS[current].some((status) => status === next)
 }

@@ -119,7 +119,20 @@ export class ArtifactValidator {
 		private readonly logger?: HarnessLoggerPort,
 	) {}
 
-	async validate(context: TaskContext, options: ArtifactValidationOptions = {}): Promise<ArtifactValidationReport> {
+	/**
+	 * Validate the task artifacts.
+	 *
+	 * `artifacts` lets a caller that already read the implementation snapshot pass
+	 * it in. That is the point of the parameter: validation and scheduling must
+	 * judge the *same* filesystem state, so re-reading here would let a concurrent
+	 * write make the validation decision and the assignment decision describe two
+	 * different DAGs.
+	 */
+	async validate(
+		context: TaskContext,
+		options: ArtifactValidationOptions = {},
+		artifacts?: ImplementationArtifacts,
+	): Promise<ArtifactValidationReport> {
 		const issues: ArtifactValidationIssue[] = []
 		const requiresImplementationArtifacts = STAGES_REQUIRING_IMPLEMENTATION_ARTIFACTS.has(options.status ?? "")
 		const missingSeverity: ArtifactValidationSeverity = requiresImplementationArtifacts ? "error" : "warning"
@@ -147,21 +160,21 @@ export class ArtifactValidator {
 			issues.push(issue("error", "unclosed-code-fence", null, "unclosed markdown code fence in handoff.md"))
 		}
 
-		const artifacts = await this.parser.read(context)
+		const snapshot = artifacts ?? (await this.parser.read(context))
 
-		if (artifacts.missingDirectory) {
+		if (snapshot.missingDirectory) {
 			issues.push(
 				issue(missingSeverity, "missing-implementation-directory", null, "Missing implementation/ directory"),
 			)
 		}
 
-		for (const id of artifacts.duplicateIds) {
+		for (const id of snapshot.duplicateIds) {
 			issues.push(issue("error", "duplicate-task-id", id, "duplicate task ID across implementation artifacts"))
 		}
 
-		const knownIds = new Set(artifacts.tasks.map((task) => task.id))
+		const knownIds = new Set(snapshot.tasks.map((task) => task.id))
 
-		for (const task of sortTasks(artifacts.tasks)) {
+		for (const task of sortTasks(snapshot.tasks)) {
 			if (task.statusProblem) {
 				const code: ArtifactValidationCode = task.statusProblem.startsWith("missing")
 					? "missing-task-status"
@@ -184,12 +197,12 @@ export class ArtifactValidator {
 			}
 		}
 
-		for (const cycle of findDependencyCycles(artifacts.tasks)) {
+		for (const cycle of findDependencyCycles(snapshot.tasks)) {
 			issues.push(issue("error", "dependency-cycle", cycle[0] ?? null, `dependency cycle: ${cycle.join(" -> ")}`))
 		}
 
-		const pending = artifacts.tasks.filter((task) => task.status === "TODO" || task.status === "IN_PROGRESS")
-		if (pending.length > 0 && readyTasks(artifacts.tasks).length === 0) {
+		const pending = snapshot.tasks.filter((task) => task.status === "TODO" || task.status === "IN_PROGRESS")
+		if (pending.length > 0 && readyTasks(snapshot.tasks).length === 0) {
 			issues.push(
 				issue(
 					"warning",
@@ -200,7 +213,7 @@ export class ArtifactValidator {
 			)
 		}
 
-		for (const fileName of artifacts.unexpectedFiles) {
+		for (const fileName of snapshot.unexpectedFiles) {
 			issues.push(issue("warning", "unexpected-artifact", null, `implementation/${fileName}: not a Txx artifact`))
 		}
 
@@ -214,8 +227,8 @@ export class ArtifactValidator {
 				taskId: context.taskId,
 				status: options.status ?? null,
 				requiresImplementationArtifacts,
-				taskCount: artifacts.tasks.length,
-				missingDirectory: artifacts.missingDirectory,
+				taskCount: snapshot.tasks.length,
+				missingDirectory: snapshot.missingDirectory,
 			},
 			result: { valid, errorCount: errors.length, warningCount: warnings.length },
 			reason: valid
@@ -229,13 +242,13 @@ export class ArtifactValidator {
 					taskId: item.taskId,
 					message: item.message,
 				})),
-				duplicateIds: artifacts.duplicateIds,
-				unexpectedFiles: artifacts.unexpectedFiles,
+				duplicateIds: snapshot.duplicateIds,
+				unexpectedFiles: snapshot.unexpectedFiles,
 			},
 			context: { taskId: context.taskId },
 		})
 
-		return { issues, errors, warnings, artifacts, valid }
+		return { issues, errors, warnings, artifacts: snapshot, valid }
 	}
 
 	private async readOptional(filePath: string): Promise<string | null> {

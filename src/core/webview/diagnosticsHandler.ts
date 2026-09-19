@@ -14,10 +14,27 @@ export interface ErrorDiagnosticsValues {
 	details?: string
 }
 
+/**
+ * A retained tool failure included in the report. Mirrors the shape returned by
+ * `Task#getRecentToolErrors()` without importing the Task module (type-only
+ * structural match).
+ */
+export interface ErrorDiagnosticsToolError {
+	tool: string
+	error: string
+	timestamp: number
+}
+
 export interface GenerateDiagnosticsParams {
 	taskId: string
 	globalStoragePath: string
 	values?: ErrorDiagnosticsValues
+	/**
+	 * Concrete tool failures recorded by the task. The mistake-limit guidance in
+	 * `values.details` is generic, so without these the report cannot explain what
+	 * the model actually did wrong.
+	 */
+	toolErrors?: readonly ErrorDiagnosticsToolError[]
 	log: (message: string) => void
 }
 
@@ -33,7 +50,7 @@ export interface GenerateDiagnosticsResult {
  * before sharing with support.
  */
 export async function generateErrorDiagnostics(params: GenerateDiagnosticsParams): Promise<GenerateDiagnosticsResult> {
-	const { taskId, globalStoragePath, values, log } = params
+	const { taskId, globalStoragePath, values, toolErrors = [], log } = params
 
 	try {
 		const taskDirPath = await getTaskDirectoryPath(globalStoragePath, taskId)
@@ -59,6 +76,9 @@ export async function generateErrorDiagnostics(params: GenerateDiagnosticsParams
 				provider: values?.provider ?? "",
 				model: values?.model ?? "",
 				details: values?.details ?? "",
+				// Omitted entirely when the task recorded no failures, so reports
+				// without tool errors keep their existing shape.
+				...(toolErrors.length > 0 ? { toolErrors } : {}),
 			},
 			history,
 		}

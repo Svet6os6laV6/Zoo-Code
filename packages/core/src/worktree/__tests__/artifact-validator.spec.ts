@@ -2,6 +2,7 @@ import * as path from "path"
 
 import { ArtifactValidator, formatArtifactValidationIssues } from "../artifact-validator.js"
 import type { TaskContext } from "../task-resolver.js"
+import { parseImplementationTask, type ImplementationArtifacts } from "../txx-parser.js"
 import { createInMemoryFileSystem } from "./helpers/in-memory-fs.js"
 
 const taskRoot = path.join("/workspace", ".roo", "tasks", "SITESUP-1116")
@@ -184,6 +185,30 @@ describe("ArtifactValidator", () => {
 			taskId: null,
 			message: "implementation/notes.md: not a Txx artifact",
 		})
+	})
+})
+
+describe("ArtifactValidator snapshot contract", () => {
+	it("validates the provided snapshot instead of re-reading implementation/", async () => {
+		const provided: ImplementationArtifacts = {
+			directory: implementation,
+			missingDirectory: false,
+			tasks: [
+				parseImplementationTask(
+					"T09-provided.md",
+					path.join(implementation, "T09-provided.md"),
+					"## Status\nStatus: TODO\n",
+				),
+			],
+			duplicateIds: [],
+			unexpectedFiles: [],
+		}
+
+		// The in-memory filesystem holds T01/T02; the report must describe T09.
+		const report = await validatorFor().validate(taskContext, { status: "IMPLEMENTATION" }, provided)
+
+		expect(report.artifacts).toBe(provided)
+		expect(report.artifacts.tasks.map((task) => task.id)).toEqual(["T09"])
 	})
 })
 

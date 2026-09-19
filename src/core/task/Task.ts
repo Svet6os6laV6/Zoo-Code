@@ -61,14 +61,18 @@ import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
 import {
 	ArtifactValidator,
+	diffImplementationArtifacts,
 	StateReconciler,
 	TaskResolver,
 	TaskScheduler,
 	TaskStateError,
 	TaskStateResolver,
+	TxxParser,
 	harnessLogger,
 	type ArtifactValidationIssue,
+	type HarnessLogContextInput,
 	type HarnessLoggerPort,
+	type ImplementationArtifacts,
 	type TaskContext,
 	type TaskState,
 } from "@roo-code/core"
@@ -161,6 +165,7 @@ const defaultTaskStateResolver = new TaskStateResolver()
 const defaultArtifactValidator = new ArtifactValidator()
 const defaultTaskScheduler = new TaskScheduler()
 const defaultStateReconciler = new StateReconciler()
+const defaultTxxParser = new TxxParser()
 
 type QueuedAskResolution = { response: ClineAskResponse; requiresDurableAck: boolean }
 
@@ -191,6 +196,20 @@ function queuedResponseForAsk(type: ClineAsk, text?: string): QueuedAskResolutio
 const FORCED_CONTEXT_REDUCTION_PERCENT = 75 // Keep 75% of context (remove 25%) on context window errors
 const MAX_CONTEXT_WINDOW_RETRIES = 3 // Maximum retries for context window errors
 
+// Bounded so a model looping on failures cannot grow the diagnostics payload without limit.
+const MAX_RECENT_TOOL_ERRORS = 10
+
+/**
+ * A single retained tool failure. Used to enrich the error diagnostics file with
+ * the concrete reasons tools were rejected, which the generic mistake-limit
+ * guidance does not carry.
+ */
+export type RecentToolError = {
+	readonly tool: string
+	readonly error: string
+	readonly timestamp: number
+}
+
 export interface TaskOptions extends CreateTaskOptions {
 	provider: ClineProvider
 	apiConfiguration: ProviderSettings
@@ -218,6 +237,8 @@ export interface TaskOptions extends CreateTaskOptions {
 	taskStateResolver?: Pick<TaskStateResolver, "resolve">
 	artifactValidator?: Pick<ArtifactValidator, "validate">
 	taskScheduler?: Pick<TaskScheduler, "assignNext">
+	/** Reads the implementation snapshot once per resolve, shared by validator and scheduler. */
+	txxParser?: Pick<TxxParser, "read">
 	/** Diagnostic comparison between the runtime state and the canonical artifacts. */
 	stateReconciler?: Pick<StateReconciler, "reconcile">
 	/** Explicit logger injection; defaults to the process-wide harness logger. */
@@ -389,6 +410,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	consecutiveNoAssistantMessagesCount: number = 0
 	toolUsage: ToolUsage = {}
 
+	/**
+	 * Most recent tool failures in arrival order (oldest first), capped at
+	 * MAX_RECENT_TOOL_ERRORS. Read by error diagnostics so a report explains *why*
+	 * tools failed instead of only reporting that the mistake limit was reached.
+	 */
+	private recentToolErrors: RecentToolError[] = []
+
 	// Conversation message counts, summarized once per Task Completed
 	// installment instead of emitting a separate telemetry event per turn.
 	messageCounts: { user: number; assistant: number } = { user: 0, assistant: 0 }
@@ -532,9 +560,25 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly taskStateResolver: Pick<TaskStateResolver, "resolve">
 	private readonly artifactValidator: Pick<ArtifactValidator, "validate">
 	private readonly taskScheduler: Pick<TaskScheduler, "assignNext">
+	private readonly txxParser: Pick<TxxParser, "read">
 	private readonly stateReconciler: Pick<StateReconciler, "reconcile">
 	private readonly harnessLogger?: HarnessLoggerPort
 	private taskContextPromise?: Promise<TaskContext>
+	/**
+	 * Previous implementation snapshot. Compared against the next one to report
+	 * artifact mutations the harness did not perform itself (a model or tool edit
+	 * of `implementation/Txx.md`), which would otherwise be invisible between two
+	 * resolves.
+	 */
+	private lastArtifactSnapshot?: ImplementationArtifacts
+	/** Canonical README fields at the previous resolve, for README change detection. */
+	private lastResolvedTaskState?: Pick<TaskState, "status" | "currentTask">
+	/**
+	 * Lifecycle trace id for harness records: minted once, on the first harness
+	 * identity resolution, and reused for every turn, mode, and implementation
+	 * unit of this task run.
+	 */
+	private harnessTraceId?: string
 
 	// MessageManager for high-level message operations (lazy initialized)
 	private _messageManager?: MessageManager
@@ -565,6 +609,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		taskStateResolver = defaultTaskStateResolver,
 		artifactValidator = defaultArtifactValidator,
 		taskScheduler = defaultTaskScheduler,
+		txxParser = defaultTxxParser,
 		stateReconciler = defaultStateReconciler,
 		harnessLogger: harnessLoggerOverride,
 	}: TaskOptions) {
@@ -633,6 +678,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.taskStateResolver = taskStateResolver
 		this.artifactValidator = artifactValidator
 		this.taskScheduler = taskScheduler
+		this.txxParser = txxParser
 		this.stateReconciler = stateReconciler
 		this.harnessLogger = harnessLoggerOverride
 		this.taskNumber = taskNumber
@@ -4207,11 +4253,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	/**
-	 * Wraps prompt assembly in a per-turn trace, so every harness record emitted
-	 * while the prompt is built shares one `traceId`.
+	 * Wraps prompt assembly in the task lifecycle context, so every harness record
+	 * emitted while the prompt is built belongs to the same trace as the rest of
+	 * the task run instead of starting a new one per turn.
 	 */
 	private async getSystemPrompt(): Promise<string> {
-		return harnessLogger(this.harnessLogger).runWithContext({ traceId: crypto.randomUUID() }, () =>
+		return harnessLogger(this.harnessLogger).runWithContext(await this.getHarnessLogContext(), () =>
 			this.buildSystemPrompt(),
 		)
 	}
@@ -4252,7 +4299,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const apiConfiguration = this.apiConfiguration
 
 		return await harnessLogger(this.harnessLogger).runWithContext(
-			{ taskId: taskContext.taskId, txxId: taskState.currentTask, mode: mode ?? null },
+			{
+				taskId: taskContext.taskId,
+				agentTaskId: this.taskId,
+				txxId: taskState.currentTask,
+				mode: mode ?? null,
+			},
 			async () => {
 				const provider = this.providerRef.deref()
 
@@ -4307,8 +4359,37 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return this.taskContextPromise
 	}
 
+	/**
+	 * Correlation identity of this task run for harness records.
+	 *
+	 * `traceId` is the whole lifecycle: it is minted once, when the harness task
+	 * identity is first resolved, and never changes, so filtering by it
+	 * reconstructs `Architect -> Code T01 -> DONE -> T02 -> ...` in one view.
+	 * Individual operations are separated by the `spanId` the logger binds per
+	 * span, not by a new trace.
+	 *
+	 * `taskId` is the durable harness id (`SITESUP-1118`). The internal agent task
+	 * UUID is reported separately as `agentTaskId`, so an opaque per-instance id
+	 * never appears where a harness task id is expected.
+	 */
+	public async getHarnessLogContext(): Promise<HarnessLogContextInput> {
+		const taskContext = await this.getTaskContext()
+		this.harnessTraceId ??= crypto.randomUUID()
+
+		return {
+			traceId: this.harnessTraceId,
+			taskId: taskContext.taskId,
+			agentTaskId: this.taskId,
+			mode: await this.getTaskMode(),
+		}
+	}
+
 	private async resolveTaskContext(): Promise<TaskContext> {
 		const logger = harnessLogger(this.harnessLogger)
+
+		// The lifecycle trace starts with the task identity, so every later record
+		// — prompts, parsing, scheduling, LLM requests — inherits it.
+		this.harnessTraceId ??= crypto.randomUUID()
 
 		return logger.span(
 			"harness.taskContext.resolve",
@@ -4324,7 +4405,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				return resolved
 			},
-			{ attributes: { workspacePath: this.workspacePath } },
+			{
+				// The identity resolution is the first record of the lifecycle, so it
+				// must already carry the trace it starts rather than the unbound
+				// fallback. `taskId` is not known until the body resolves it.
+				context: { traceId: this.harnessTraceId, agentTaskId: this.taskId },
+				attributes: { workspacePath: this.workspacePath },
+			},
 		)
 	}
 
@@ -4338,22 +4425,109 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		let taskContext: TaskContext | undefined
 
 		try {
-			taskContext = await this.getTaskContext()
-			const taskState = await this.taskStateResolver.resolve(taskContext)
+			// Bind the lifecycle context first: a reconciliation triggered by a mode
+			// transition must land in the same trace as the task it observes, rather
+			// than being emitted with the unbound fallback identity.
+			const harnessContext = await this.getHarnessLogContext()
+			const resolved = await this.getTaskContext()
+			taskContext = resolved
 
-			await this.stateReconciler.reconcile(taskContext, taskState, {
-				phase,
-				logger,
-				context: { taskId: taskContext.taskId, txxId: taskState.currentTask },
+			await logger.runWithContext(harnessContext, async () => {
+				const taskState = await this.taskStateResolver.resolve(resolved)
+
+				await this.stateReconciler.reconcile(resolved, taskState, {
+					phase,
+					logger,
+					context: {
+						taskId: resolved.taskId,
+						agentTaskId: this.taskId,
+						txxId: taskState.currentTask,
+					},
+				})
 			})
 		} catch (error) {
 			logger.event("harness.state.reconcile.failed", {
 				level: "warn",
-				context: { taskId: taskContext?.taskId ?? null },
+				context: { taskId: taskContext?.taskId ?? null, agentTaskId: this.taskId },
 				attributes: {
 					phase,
 					error: error instanceof Error ? error.message : String(error),
 				},
+			})
+		}
+	}
+
+	/**
+	 * Record artifact mutations the harness did not perform itself.
+	 *
+	 * Between two resolves the model (or a tool acting for it) edits the canonical
+	 * artifacts. Without this record the harness log jumps from `T01 = IN_PROGRESS`
+	 * to `T01 = DONE` with nothing in between, so the transition cannot be read
+	 * literally as `edit -> status change -> reconcile -> assign`.
+	 *
+	 * Pure reporting: it never mutates state and never throws. The baseline is the
+	 * previous resolve, so the first resolve of a task run reports nothing.
+	 */
+	private reportArtifactChanges(
+		taskContext: TaskContext,
+		snapshot: ImplementationArtifacts,
+		taskState: TaskState,
+	): void {
+		const logger = harnessLogger(this.harnessLogger)
+		const baseContext = { taskId: taskContext.taskId, agentTaskId: this.taskId }
+		const previousTasks = this.lastArtifactSnapshot?.tasks ?? []
+		const previousById = new Map(previousTasks.map((task) => [task.id, task]))
+		const currentById = new Map(snapshot.tasks.map((task) => [task.id, task]))
+		const diff = diffImplementationArtifacts(this.lastArtifactSnapshot ?? null, snapshot)
+
+		for (const change of diff.statusChanges) {
+			logger.event("harness.taskUnit.statusChanged", {
+				context: { ...baseContext, txxId: change.id },
+				attributes: { unit: change.id, from: change.from, to: change.to },
+			})
+		}
+
+		const reportUnitChange = (id: string, reasonCode: string, reason: string): void => {
+			const before = previousById.get(id)
+			const after = currentById.get(id)
+
+			logger.mutation("harness.artifact.changed", {
+				context: { ...baseContext, txxId: id },
+				target: after?.artifact ?? before?.artifact ?? id,
+				stateBefore: before ? { status: before.status, contentHash: before.contentHash } : null,
+				stateAfter: after ? { status: after.status, contentHash: after.contentHash } : null,
+				reason,
+				attributes: { reasonCode },
+			})
+		}
+
+		for (const id of diff.rewrittenUnits) {
+			reportUnitChange(id, "unit-rewritten", `implementation unit ${id} was rewritten on disk`)
+		}
+
+		for (const id of diff.addedUnits) {
+			reportUnitChange(id, "unit-added", `implementation unit ${id} appeared on disk`)
+		}
+
+		for (const id of diff.removedUnits) {
+			reportUnitChange(id, "unit-removed", `implementation unit ${id} disappeared from disk`)
+		}
+
+		// The canonical README is the lifecycle authority, so a status or current-unit
+		// change there is reported even when no implementation artifact moved.
+		const previousState = this.lastResolvedTaskState
+
+		if (
+			previousState &&
+			(previousState.status !== taskState.status || previousState.currentTask !== taskState.currentTask)
+		) {
+			logger.mutation("harness.artifact.changed", {
+				context: baseContext,
+				target: path.join(taskContext.taskRoot, "README.md"),
+				stateBefore: { status: previousState.status, currentTask: previousState.currentTask },
+				stateAfter: { status: taskState.status, currentTask: taskState.currentTask },
+				reason: "canonical README fields changed since the previous resolve",
+				attributes: { reasonCode: "readme-changed" },
 			})
 		}
 	}
@@ -4379,6 +4553,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				let taskState: TaskState
 				let readmeRejected = false
 
+				// `implementation/` is read exactly once per resolve. The validator and
+				// the scheduler both consume this snapshot, so a concurrent write cannot
+				// make the validation decision and the assignment decision describe two
+				// different DAGs.
+				const snapshot = await this.txxParser.read(taskContext)
+
 				try {
 					taskState = await this.taskStateResolver.resolve(taskContext)
 				} catch (error) {
@@ -4403,13 +4583,31 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 				}
 
-				const report = await this.artifactValidator.validate(taskContext, { status: taskState.status })
+				// Make external artifact mutations visible: the model edited an artifact
+				// between this resolve and the previous one, and that edit is what the
+				// following lifecycle moves are a consequence of. Reporting is
+				// diagnostic, so it must never change the resolve it observes.
+				try {
+					this.reportArtifactChanges(taskContext, snapshot, taskState)
+				} catch (error) {
+					logger.event("harness.artifact.changed.failed", {
+						level: "warn",
+						context: { taskId: taskContext.taskId, agentTaskId: this.taskId },
+						attributes: { error: error instanceof Error ? error.message : String(error) },
+					})
+				}
+
+				const report = await this.artifactValidator.validate(
+					taskContext,
+					{ status: taskState.status },
+					snapshot,
+				)
 				artifactIssues.push(...report.issues)
 
 				let assigned = false
 
 				if (report.valid) {
-					const assignment = await this.taskScheduler.assignNext(taskContext, taskState)
+					const assignment = await this.taskScheduler.assignNext(taskContext, taskState, snapshot)
 
 					if (assignment) {
 						taskState = assignment.state
@@ -4424,7 +4622,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					artifactIssueCount: artifactIssues.length,
 					assigned,
 					readmeRejected,
+					unitCount: snapshot.tasks.length,
 				})
+
+				// The snapshot and the lifecycle fields become the baseline for the
+				// next resolve, so the next diff reports only what changed after this
+				// point.
+				this.lastArtifactSnapshot = snapshot
+				this.lastResolvedTaskState = { status: taskState.status, currentTask: taskState.currentTask }
 
 				// Diagnostic only: compare the runtime view with the canonical artifacts
 				// after a transition. The reconciler never mutates and never throws.
@@ -4435,7 +4640,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						await this.stateReconciler.reconcile(taskContext, taskState, {
 							phase,
 							logger,
-							context: { taskId: taskContext.taskId, txxId: taskState.currentTask },
+							context: {
+								taskId: taskContext.taskId,
+								agentTaskId: this.taskId,
+								txxId: taskState.currentTask,
+							},
 						})
 					} catch (error) {
 						// A failing diagnostic must not change the outcome it observes.
@@ -4954,10 +5163,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.skipPrevResponseIdOnce = false
 
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
-		const stream = this.api.createMessage(
-			systemPrompt,
-			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
-			metadata,
+		const stream = this.withLlmRequestTrace(retryAttempt, { model: this.api.getModel().id, mode }, () =>
+			this.api.createMessage(
+				systemPrompt,
+				cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
+				metadata,
+			),
 		)
 		const iterator = stream[Symbol.asyncIterator]()
 
@@ -5063,6 +5274,48 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// effectively passes along all subsequent chunks from the original
 		// stream.
 		yield* iterator
+	}
+
+	/**
+	 * Wrap one provider request in a start/end pair of harness records.
+	 *
+	 * The records carry metadata only — model, mode, attempt, duration, outcome —
+	 * so a completed turn can be read as `prompt -> llm.request -> tool.call ->
+	 * artifact.changed` without ever writing prompt or response text to the log.
+	 */
+	private async *withLlmRequestTrace(
+		attempt: number,
+		attributes: Record<string, unknown>,
+		createStream: () => ApiStream,
+	): ApiStream {
+		const logger = harnessLogger(this.harnessLogger)
+		let context: HarnessLogContextInput
+
+		try {
+			context = await this.getHarnessLogContext()
+		} catch {
+			// A model request must still run when the harness identity cannot be
+			// resolved; the agent task id alone keeps the record attributable.
+			context = { agentTaskId: this.taskId }
+		}
+
+		const startedAt = Date.now()
+		logger.event("harness.llm.request.start", { context, attributes: { ...attributes, attempt } })
+
+		let status: "ok" | "error" = "ok"
+
+		try {
+			yield* createStream()
+		} catch (error) {
+			status = "error"
+			throw error
+		} finally {
+			logger.event("harness.llm.request.end", {
+				level: status === "error" ? "warn" : "info",
+				context,
+				attributes: { ...attributes, attempt, status, durationMs: Date.now() - startedAt },
+			})
+		}
 	}
 
 	// Shared exponential backoff for retries (first-chunk and mid-stream)
@@ -5321,8 +5574,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.toolUsage[toolName].failures++
 
 		if (error) {
+			this.recentToolErrors.push({ tool: toolName, error, timestamp: Date.now() })
+			if (this.recentToolErrors.length > MAX_RECENT_TOOL_ERRORS) {
+				this.recentToolErrors.splice(0, this.recentToolErrors.length - MAX_RECENT_TOOL_ERRORS)
+			}
+
 			this.emit(RooCodeEventName.TaskToolFailed, this.taskId, toolName, error)
 		}
+	}
+
+	/** Snapshot of the retained tool failures, oldest first. */
+	public getRecentToolErrors(): readonly RecentToolError[] {
+		return this.recentToolErrors.map((entry) => ({ ...entry }))
 	}
 
 	/**

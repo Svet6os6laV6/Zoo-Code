@@ -12,8 +12,10 @@ import type {
 
 const BASE_CONTEXT: HarnessLogContext = {
 	traceId: "trace-test",
+	spanId: null,
 	sessionId: "session-test",
 	taskId: null,
+	agentTaskId: null,
 	txxId: null,
 	mode: null,
 }

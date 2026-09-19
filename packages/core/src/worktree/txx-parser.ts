@@ -16,6 +16,7 @@
  * - YAML frontmatter (`status`, `depends_on`, `parallel_with`).
  */
 
+import { createHash } from "crypto"
 import { promises as fs } from "fs"
 import * as path from "path"
 
@@ -45,6 +46,12 @@ export type ImplementationTask = {
 	readonly consumes: string | null
 	/** True when the artifact has an odd number of markdown code fences (truncated file). */
 	readonly unclosedCodeFence: boolean
+	/**
+	 * Hash of the raw artifact content. Detects that a file changed between two
+	 * snapshots even when its parsed fields did not, so `harness.artifact.changed`
+	 * is driven by the bytes on disk rather than by a field-level guess.
+	 */
+	readonly contentHash: string
 }
 
 export type ImplementationArtifacts = {
@@ -212,6 +219,13 @@ function normalizeStatus(value: string | null): { status: ImplementationTaskStat
 }
 
 /**
+ * Stable content hash for change detection between two parses of the same file.
+ */
+function hashContent(content: string): string {
+	return createHash("sha1").update(content, "utf8").digest("hex")
+}
+
+/**
  * Parse a single implementation unit artifact. Pure and filesystem-free.
  */
 export function parseImplementationTask(fileName: string, artifact: string, content: string): ImplementationTask {
@@ -243,6 +257,7 @@ export function parseImplementationTask(fileName: string, artifact: string, cont
 		produces: readField(relationships, "Produces"),
 		consumes: readField(relationships, "Consumes"),
 		unclosedCodeFence: hasUnclosedCodeFence(content),
+		contentHash: hashContent(content),
 	}
 }
 

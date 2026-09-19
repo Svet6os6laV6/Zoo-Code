@@ -27,6 +27,16 @@ vi.mock("@roo-code/core", () => ({
 	TaskScheduler: class {
 		assignNext = vi.fn()
 	},
+	TxxParser: class {
+		read = vi.fn()
+	},
+	diffImplementationArtifacts: vi.fn().mockReturnValue({
+		rewrittenUnits: [],
+		addedUnits: [],
+		removedUnits: [],
+		statusChanges: [],
+		changed: false,
+	}),
 	StateReconciler: class {
 		reconcile = vi.fn()
 	},

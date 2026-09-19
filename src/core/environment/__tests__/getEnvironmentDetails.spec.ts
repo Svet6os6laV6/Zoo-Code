@@ -91,6 +91,7 @@ describe("getEnvironmentDetails", () => {
 			cwd: mockCwd,
 			taskId: mockTaskId,
 			didEditFile: false,
+			getTaskMode: vi.fn().mockResolvedValue("code"),
 			fileContextTracker: {
 				getAndClearRecentlyModifiedFiles: vi.fn().mockReturnValue([]),
 			} as unknown as FileContextTracker,
@@ -163,6 +164,21 @@ describe("getEnvironmentDetails", () => {
 		})
 
 		expect(getApiMetrics).toHaveBeenCalledWith(mockCline.clineMessages)
+	})
+
+	it("should report the task's own mode when it differs from the provider's", async () => {
+		// A harness stage runs as a delegated child while provider state still holds
+		// the parent's mode. Environment details must follow the task-local mode, so
+		// the model is not told it is in the parent's (e.g. orchestrator) mode while
+		// the system prompt already says `code`.
+		mockState.mode = "orchestrator"
+		vi.mocked(mockCline.getTaskMode as Mock).mockResolvedValue("code")
+
+		const result = await getEnvironmentDetails(mockCline as Task)
+
+		expect(result).toContain("<slug>code</slug>")
+		expect(result).not.toContain("<slug>orchestrator</slug>")
+		expect(getFullModeDetails).toHaveBeenCalledWith("code", [], undefined, expect.anything())
 	})
 
 	it("should include file details when includeFileDetails is true", async () => {

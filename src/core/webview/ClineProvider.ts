@@ -68,7 +68,7 @@ import {
 import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTaskCosts"
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
-import { harnessLogger } from "@roo-code/core"
+import { LifecycleError, harnessLogger, type HarnessLogContextInput } from "@roo-code/core"
 
 import { Package } from "../../shared/package"
 import { findLast } from "../../shared/array"
@@ -113,6 +113,7 @@ import { ContextProxy } from "../config/ContextProxy"
 import { ProviderSettingsManager } from "../config/ProviderSettingsManager"
 import { CustomModesManager } from "../config/CustomModesManager"
 import { Task } from "../task/Task"
+import { HarnessModeRunner } from "../harness/mode-runner"
 
 import { webviewMessageHandler } from "./webviewMessageHandler"
 import type { ClineMessage, TodoItem } from "@roo-code/types"
@@ -206,6 +207,7 @@ type GetStateOptions = {
 	includeTaskHistory?: boolean
 }
 
+// allow: SIZE_OK — legacy extension-host composition root; new lifecycle logic lives in dedicated modules.
 export class ClineProvider
 	extends EventEmitter<TaskProviderEvents>
 	implements vscode.WebviewViewProvider, TelemetryPropertiesProvider, TaskProviderLike
@@ -1790,21 +1792,39 @@ export class ClineProvider
 
 		this.emit(RooCodeEventName.ModeChanged, newMode)
 
-		harnessLogger().event("harness.mode.transition", {
-			context: { taskId: task?.taskId ?? null, mode: newMode },
-			attributes: {
-				fromMode: previousMode,
-				toMode: newMode,
-				reason: "handleModeSwitch",
-				taskScoped: Boolean(task),
-			},
-		})
+		// A mode transition belongs to the lifecycle of the task it switches, so
+		// bind that task's harness context — lifecycle trace, harness task id, and
+		// the internal agent task id — instead of emitting an unbound record keyed
+		// by the agent task UUID.
+		let harnessContext: HarnessLogContextInput = { mode: newMode, taskId: null, agentTaskId: null }
 
-		// Diagnostic only: a mode transition is a good moment to verify that the
-		// runtime view still matches the canonical task artifacts.
 		if (task) {
-			await runHarnessReconciliation(task, "mode.transition")
+			try {
+				harnessContext = { ...(await task.getHarnessLogContext()), mode: newMode }
+			} catch {
+				// Observability must never break a mode switch: keep the agent task
+				// id so the record is still attributable, and let the trace stay
+				// unbound rather than reporting a wrong harness task id.
+				harnessContext = { mode: newMode, agentTaskId: task.taskId }
+			}
 		}
+
+		await harnessLogger().runWithContext(harnessContext, async () => {
+			harnessLogger().event("harness.mode.transition", {
+				attributes: {
+					fromMode: previousMode,
+					toMode: newMode,
+					reason: "handleModeSwitch",
+					taskScoped: Boolean(task),
+				},
+			})
+
+			// Diagnostic only: a mode transition is a good moment to verify that the
+			// runtime view still matches the canonical task artifacts.
+			if (task) {
+				await runHarnessReconciliation(task, "mode.transition")
+			}
+		})
 
 		// If workspace lock is on, keep the current API config — don't load mode-specific config
 		const lockApiConfigAcrossModes = this.context.workspaceState.get("lockApiConfigAcrossModes", false)
@@ -4390,6 +4410,35 @@ export class ClineProvider
 					await parentInstance.overwriteApiConversationHistory(parentApiMessages, false)
 				} catch {
 					// non-fatal
+				}
+
+				if (childHistory?.mode) {
+					try {
+						const lifecycleResult = await new HarnessModeRunner(async (mode, message) => {
+							const { customModes } = await this.getState()
+							if (!getModeBySlug(mode, customModes)) {
+								throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
+							}
+
+							await this.delegateParentAndOpenChildUnlocked({
+								parentTaskId,
+								message,
+								initialTodos: [],
+								mode,
+							})
+						}).run(parentInstance, childHistory.mode, completionResultSummary)
+
+						if (lifecycleResult) {
+							this.cancelledDelegationChildIds.delete(childTaskId)
+							return true
+						}
+					} catch (error) {
+						this.log(
+							`[reopenParentFromDelegation] Lifecycle routing failed after child ${childTaskId}: ${
+								error instanceof Error ? error.message : String(error)
+							}. Resuming the parent through the legacy path.`,
+						)
+					}
 				}
 
 				let admitContinuation!: () => void

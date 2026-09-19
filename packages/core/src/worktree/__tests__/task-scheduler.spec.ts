@@ -3,6 +3,7 @@ import * as path from "path"
 import type { TaskContext } from "../task-resolver.js"
 import type { TaskState } from "../task-state.js"
 import { TaskScheduler } from "../task-scheduler.js"
+import { parseImplementationTask, type ImplementationArtifacts } from "../txx-parser.js"
 import { createInMemoryFileSystem, type InMemoryFileSystemHandle } from "./helpers/in-memory-fs.js"
 
 const taskRoot = path.join("/workspace", ".roo", "tasks", "SITESUP-1116")
@@ -175,7 +176,7 @@ Next Step: Implement T02 (implementation/T02-worker.md).
 		expect(fileSystem.files.get(readmePath)).toBe(readme)
 	})
 
-	it("inserts Current Task when a legacy README has no such field", async () => {
+	it("inserts the missing canonical fields when a legacy README lacks them", async () => {
 		const readme = "Protocol Version: 2\nTask: SITESUP-1116\nStatus: READY_FOR_IMPLEMENTATION\n"
 		const { scheduler, fileSystem } = schedulerFor(readme, DAG)
 		const assignment = await scheduler.assignNext(taskContext, state())
@@ -185,6 +186,35 @@ Next Step: Implement T02 (implementation/T02-worker.md).
 Task: SITESUP-1116
 Status: IMPLEMENTATION
 Current Task: implementation/T02-worker.md
+Next Step: Implement T02 (implementation/T02-worker.md).
 `)
+	})
+
+	it("assigns from the provided snapshot without re-reading implementation/", async () => {
+		const { scheduler, fileSystem } = schedulerFor(READY_README, DAG)
+		const provided: ImplementationArtifacts = {
+			directory: implementation,
+			missingDirectory: false,
+			tasks: [
+				parseImplementationTask(
+					"T01-trigger.md",
+					path.join(implementation, "T01-trigger.md"),
+					"## Status\nStatus: DONE\n",
+				),
+				parseImplementationTask(
+					"T09-provided.md",
+					path.join(implementation, "T09-provided.md"),
+					"## Status\nStatus: TODO\n",
+				),
+			],
+			duplicateIds: [],
+			unexpectedFiles: [],
+		}
+
+		const assignment = await scheduler.assignNext(taskContext, state(), provided)
+
+		// T02/T03 exist on disk but not in the snapshot, so T09 is the only ready unit.
+		expect(assignment).toMatchObject({ relativeArtifact: "implementation/T09-provided.md" })
+		expect(fileSystem.files.get(readmePath)).toContain("Current Task: implementation/T09-provided.md")
 	})
 })

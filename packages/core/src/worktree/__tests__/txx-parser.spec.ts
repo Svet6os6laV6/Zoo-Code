@@ -30,6 +30,7 @@ function task(id: string, status: ImplementationTask["status"], dependsOn: strin
 		produces: null,
 		consumes: null,
 		unclosedCodeFence: false,
+		contentHash: `${id}-hash`,
 	}
 }
 

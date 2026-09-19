@@ -17,6 +17,7 @@ import {
 	type TaskLike,
 } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
+import { HarnessLogger, type HarnessLogRecord, type ImplementationArtifacts } from "@roo-code/core"
 
 import { Task } from "../Task"
 import { SYSTEM_PROMPT } from "../../prompts/system"
@@ -782,6 +783,57 @@ describe("Cline", () => {
 			expect(cline.consecutiveMistakeLimit).toBe(5)
 		})
 
+		it("retains tool errors for error diagnostics", () => {
+			const cline = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+			})
+
+			cline.recordToolError("read_file", 'Tool "read_file" is not allowed in orchestrator mode.')
+
+			expect(cline.getRecentToolErrors()).toEqual([
+				{
+					tool: "read_file",
+					error: 'Tool "read_file" is not allowed in orchestrator mode.',
+					timestamp: expect.any(Number),
+				},
+			])
+		})
+
+		it("caps retained tool errors at the newest ten", () => {
+			const cline = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+			})
+
+			for (let i = 1; i <= 12; i++) {
+				cline.recordToolError("read_file", `failure ${i}`)
+			}
+
+			const retained = cline.getRecentToolErrors()
+			expect(retained).toHaveLength(10)
+			expect(retained[0].error).toBe("failure 3")
+			expect(retained[9].error).toBe("failure 12")
+		})
+
+		it("does not retain an entry when no error message is recorded", () => {
+			const cline = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+			})
+
+			cline.recordToolError("read_file")
+
+			expect(cline.getRecentToolErrors()).toEqual([])
+			expect(cline.toolUsage.read_file?.failures).toBe(1)
+		})
+
 		it("should require either task or historyItem", () => {
 			expect(() => {
 				new Task({ provider: mockProvider, apiConfiguration: mockApiConfig })
@@ -812,22 +864,24 @@ describe("Cline", () => {
 				mcpEnabled: false,
 			} as unknown as ProviderState)
 
+			const snapshot = {
+				directory: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation",
+				missingDirectory: false,
+				tasks: [],
+				duplicateIds: [],
+				unexpectedFiles: [],
+			}
 			const artifactValidator = {
 				validate: vi.fn().mockResolvedValue({
 					issues: [],
 					errors: [],
 					warnings: [],
 					valid: true,
-					artifacts: {
-						directory: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation",
-						missingDirectory: false,
-						tasks: [],
-						duplicateIds: [],
-						unexpectedFiles: [],
-					},
+					artifacts: snapshot,
 				}),
 			}
 			const taskScheduler = { assignNext: vi.fn().mockResolvedValue(null) }
+			const txxParser = { read: vi.fn().mockResolvedValue(snapshot) }
 
 			const task = new Task({
 				provider: mockProvider,
@@ -838,6 +892,7 @@ describe("Cline", () => {
 				taskStateResolver: { resolve: vi.fn().mockResolvedValue(taskState) },
 				artifactValidator,
 				taskScheduler,
+				txxParser,
 			})
 			await task.getTaskMode()
 
@@ -859,8 +914,255 @@ describe("Cline", () => {
 				taskState,
 				artifactValidationIssues: [],
 			})
-			expect(artifactValidator.validate).toHaveBeenCalledWith(taskContext, { status: "IMPLEMENTATION" })
-			expect(taskScheduler.assignNext).toHaveBeenCalledWith(taskContext, taskState)
+			// One filesystem snapshot per resolve: the validator and the scheduler
+			// must judge the same implementation/ contents.
+			expect(txxParser.read).toHaveBeenCalledTimes(1)
+			expect(artifactValidator.validate).toHaveBeenCalledWith(taskContext, { status: "IMPLEMENTATION" }, snapshot)
+			expect(taskScheduler.assignNext).toHaveBeenCalledWith(taskContext, taskState, snapshot)
+		})
+
+		it("keeps one lifecycle trace id across prompt assemblies and never keys records by the agent task id", async () => {
+			const taskContext = {
+				taskId: "SITESUP-1116",
+				branch: "feature/SITESUP-1116-heartbeat",
+				taskRoot: "/mock/workspace/path/.roo/tasks/SITESUP-1116",
+			}
+			const taskState = {
+				taskId: "SITESUP-1116",
+				status: "IMPLEMENTATION" as const,
+				currentTask: "T02",
+				currentTaskArtifact:
+					"/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T02-worker-heartbeat.md",
+			}
+			const snapshot = {
+				directory: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation",
+				missingDirectory: false,
+				tasks: [],
+				duplicateIds: [],
+				unexpectedFiles: [],
+			}
+			const records: HarnessLogRecord[] = []
+			const logger = new HarnessLogger({
+				sinks: [
+					{
+						name: "recording",
+						write: (record) => {
+							records.push(record)
+						},
+					},
+				],
+			})
+
+			vi.spyOn(mockProvider, "getState").mockResolvedValue({
+				mode: "code",
+				mcpEnabled: false,
+			} as unknown as ProviderState)
+
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+				taskResolver: { resolve: vi.fn().mockResolvedValue(taskContext) },
+				taskStateResolver: { resolve: vi.fn().mockResolvedValue(taskState) },
+				artifactValidator: {
+					validate: vi.fn().mockResolvedValue({
+						issues: [],
+						errors: [],
+						warnings: [],
+						valid: true,
+						artifacts: snapshot,
+					}),
+				},
+				taskScheduler: { assignNext: vi.fn().mockResolvedValue(null) },
+				txxParser: { read: vi.fn().mockResolvedValue(snapshot) },
+				harnessLogger: logger,
+			})
+			await task.getTaskMode()
+			vi.mocked(SYSTEM_PROMPT).mockResolvedValue("mock system prompt")
+
+			await getTaskTestAccess(task).getSystemPrompt()
+			await getTaskTestAccess(task).getSystemPrompt()
+
+			expect(records.length).toBeGreaterThan(0)
+
+			// One lifecycle, one trace: a second prompt assembly must not start a new one.
+			const traces = new Set(records.map((record) => record.context.traceId))
+			expect(traces.size).toBe(1)
+			expect([...traces][0]).not.toBe("unbound-trace")
+
+			// The internal agent task UUID is reported as agentTaskId, never as taskId.
+			expect(records.some((record) => record.context.taskId === task.taskId)).toBe(false)
+			expect(records.every((record) => record.context.agentTaskId === task.taskId)).toBe(true)
+		})
+
+		it("records an artifact status mutation performed outside the harness", async () => {
+			const taskContext = {
+				taskId: "SITESUP-1116",
+				branch: "feature/SITESUP-1116-heartbeat",
+				taskRoot: "/mock/workspace/path/.roo/tasks/SITESUP-1116",
+			}
+			const taskState = {
+				taskId: "SITESUP-1116",
+				status: "IMPLEMENTATION" as const,
+				currentTask: "T01",
+				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
+			}
+			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
+			const snapshotWith = (status: "IN_PROGRESS" | "DONE"): ImplementationArtifacts => ({
+				directory,
+				missingDirectory: false,
+				tasks: [
+					{
+						id: "T01",
+						fileName: "T01-worker.md",
+						artifact: `${directory}/T01-worker.md`,
+						status,
+						statusProblem: null,
+						dependsOn: [],
+						parallelWith: [],
+						produces: null,
+						consumes: null,
+						unclosedCodeFence: false,
+						contentHash: `T01:${status}`,
+					},
+				],
+				duplicateIds: [],
+				unexpectedFiles: [],
+			})
+			const done = snapshotWith("DONE")
+			const records: HarnessLogRecord[] = []
+			const read = vi.fn<() => Promise<ImplementationArtifacts>>()
+			read.mockResolvedValueOnce(snapshotWith("IN_PROGRESS")).mockResolvedValueOnce(done)
+
+			vi.spyOn(mockProvider, "getState").mockResolvedValue({
+				mode: "code",
+				mcpEnabled: false,
+			} as unknown as ProviderState)
+
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+				taskResolver: { resolve: vi.fn().mockResolvedValue(taskContext) },
+				taskStateResolver: { resolve: vi.fn().mockResolvedValue(taskState) },
+				artifactValidator: {
+					validate: vi.fn().mockResolvedValue({
+						issues: [],
+						errors: [],
+						warnings: [],
+						valid: true,
+						artifacts: done,
+					}),
+				},
+				taskScheduler: { assignNext: vi.fn().mockResolvedValue(null) },
+				txxParser: { read },
+				harnessLogger: new HarnessLogger({
+					sinks: [
+						{
+							name: "recording",
+							write: (record) => {
+								records.push(record)
+							},
+						},
+					],
+				}),
+			})
+			await task.getTaskMode()
+			vi.mocked(SYSTEM_PROMPT).mockResolvedValue("mock system prompt")
+
+			await getTaskTestAccess(task).getSystemPrompt()
+			await getTaskTestAccess(task).getSystemPrompt()
+
+			// The model's `IN_PROGRESS -> DONE` edit is visible as a lifecycle event...
+			const statusChange = records.find((record) => record.name === "harness.taskUnit.statusChanged")
+			expect(statusChange?.attributes).toMatchObject({ unit: "T01", from: "IN_PROGRESS", to: "DONE" })
+
+			// ...and as the artifact mutation that caused it, with both sides recorded.
+			const artifactChange = records.find(
+				(record) =>
+					record.name === "harness.artifact.changed" && record.attributes?.reasonCode === "unit-rewritten",
+			)
+			expect(artifactChange).toBeDefined()
+			expect(artifactChange?.stateBefore).toMatchObject({ status: "IN_PROGRESS" })
+			expect(artifactChange?.stateAfter).toMatchObject({ status: "DONE" })
+		})
+
+		it("records one metadata-only llm.request pair per provider request", async () => {
+			const records: HarnessLogRecord[] = []
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+				taskResolver: {
+					resolve: vi.fn().mockResolvedValue({
+						taskId: "SITESUP-1116",
+						branch: "feature/SITESUP-1116-heartbeat",
+						taskRoot: "/mock/workspace/path/.roo/tasks/SITESUP-1116",
+					}),
+				},
+				harnessLogger: new HarnessLogger({
+					sinks: [
+						{
+							name: "recording",
+							write: (record) => {
+								records.push(record)
+							},
+						},
+					],
+				}),
+			})
+			await task.getTaskMode()
+			vi.spyOn(getTaskTestAccess(task), "getSystemPrompt").mockResolvedValue("mock system prompt")
+			vi.spyOn(task.api, "getModel").mockReturnValue({
+				id: "test-model",
+				info: {
+					supportsImages: false,
+					supportsPromptCache: true,
+					contextWindow: 200000,
+					maxTokens: 4096,
+					inputPrice: 0.3,
+					outputPrice: 1.5,
+				} as ModelInfo,
+			})
+
+			const providerState = await mockProvider.getState()
+			vi.spyOn(mockProvider, "getState").mockResolvedValue({
+				...providerState,
+				apiConfiguration: mockApiConfig,
+				autoApprovalEnabled: true,
+				requestDelaySeconds: 0,
+			})
+
+			vi.spyOn(task.api, "createMessage").mockReturnValue(
+				asyncStreamFrom([{ type: "text", text: "model answer" }] as ApiStreamChunk[]),
+			)
+			task.apiConversationHistory = [
+				{
+					role: "user" as const,
+					content: [{ type: "text" as const, text: "test message" }],
+					ts: Date.now(),
+				},
+			]
+
+			for await (const _chunk of task.attemptApiRequest(0)) {
+				// Drain the stream so the request completes and the end record is written.
+			}
+
+			const start = records.find((record) => record.name === "harness.llm.request.start")
+			const end = records.find((record) => record.name === "harness.llm.request.end")
+
+			expect(start?.context.taskId).toBe("SITESUP-1116")
+			expect(start?.attributes).toMatchObject({ model: "test-model", attempt: 0 })
+			expect(end?.attributes).toMatchObject({ status: "ok", attempt: 0, model: "test-model" })
+			expect(typeof end?.attributes?.durationMs).toBe("number")
+
+			// Metadata only: neither the prompt nor the model output may reach the log.
+			const serialized = JSON.stringify(records)
+			expect(serialized).not.toContain("mock system prompt")
+			expect(serialized).not.toContain("model answer")
 		})
 
 		it("shares one resolved task context across Architect, Code, Reviewer, and QA tasks", async () => {
