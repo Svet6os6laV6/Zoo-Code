@@ -1007,6 +1007,8 @@ describe("Cline", () => {
 				status: "IMPLEMENTATION" as const,
 				currentTask: "T01",
 				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
+				failureKey: null,
+				failureAttempts: 0,
 			}
 			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
 			const snapshotWith = (status: "IN_PROGRESS" | "DONE"): ImplementationArtifacts => ({

@@ -259,6 +259,8 @@ describe("SYSTEM_PROMPT", () => {
 					status: "IMPLEMENTATION",
 					currentTask: "T02",
 					currentTaskArtifact: "/test/path/.roo/tasks/SITESUP-1116/implementation/T02-worker-heartbeat.md",
+					failureKey: null,
+					failureAttempts: 0,
 				},
 			},
 		)
@@ -734,6 +736,8 @@ describe("SYSTEM_PROMPT harness observability", () => {
 			status: "IMPLEMENTATION" as const,
 			currentTask: "T02",
 			currentTaskArtifact: "/test/path/.roo/tasks/SITESUP-1116/implementation/T02-worker.md",
+			failureKey: null,
+			failureAttempts: 0,
 		},
 	}
 

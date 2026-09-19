@@ -47,6 +47,8 @@ function runtimeState(overrides: Partial<TaskState> = {}): TaskState {
 		status: "IMPLEMENTATION",
 		currentTask: "T02",
 		currentTaskArtifact: path.join(implementation, "T02-worker.md"),
+		failureKey: null,
+		failureAttempts: 0,
 		...overrides,
 	}
 }

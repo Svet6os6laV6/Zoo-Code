@@ -34,6 +34,8 @@ describe("TaskScheduler integration", () => {
 				status: "READY_FOR_IMPLEMENTATION",
 				currentTask: null,
 				currentTaskArtifact: null,
+				failureKey: null,
+				failureAttempts: 0,
 			})
 
 			expect(assignment).toMatchObject({

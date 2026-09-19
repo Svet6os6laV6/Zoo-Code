@@ -2,6 +2,7 @@ import { isTaskStatusTransition, type TaskState, type TaskStatus } from "../work
 
 import {
 	LifecycleError,
+	type FailureTracking,
 	type LifecycleMode,
 	type LifecycleResult,
 	type StageOutcome,
@@ -30,8 +31,45 @@ export const MODE_STATUSES = {
 	qa: ["REVIEW_PASSED", "QA_READY"],
 } as const satisfies Record<LifecycleMode, readonly TaskStatus[]>
 
+/**
+ * Maximum number of fix passes the harness starts for a single failure key before
+ * it stops the loop and hands the task back to the user as `BLOCKED`.
+ *
+ * Deliberately a code constant, not a prompt instruction: the bound must hold even
+ * when the model keeps proposing the same remedy.
+ */
+export const MAX_FAILURE_ATTEMPTS = 3
+
 function invalid(reason: string): LifecycleResult {
 	return { type: "invalid", reason }
+}
+
+/**
+ * Attribute a fix pass to a failure key and decide whether it may still run.
+ *
+ * The key is carried over from the README when the stage did not name one, so an
+ * unnamed loop is bounded by the same counter. A different key starts a fresh
+ * count; the same key advances it. When the pass would exceed
+ * {@link MAX_FAILURE_ATTEMPTS} the loop stops instead of running another attempt.
+ */
+function startFixPass(
+	state: TaskState,
+	outcome: StageOutcome,
+	decision: { readonly type: "start_mode"; readonly status: TaskStatus; readonly mode: LifecycleMode },
+): LifecycleResult {
+	const key = outcome.failureKey ?? state.failureKey
+	const attempts = state.failureKey === key ? state.failureAttempts + 1 : 1
+
+	if (attempts > MAX_FAILURE_ATTEMPTS) {
+		return {
+			type: "stop",
+			status: "BLOCKED",
+			reason: "max-attempts",
+			failure: { key, attempts: MAX_FAILURE_ATTEMPTS },
+		}
+	}
+
+	return { ...decision, failure: { key, attempts } }
 }
 
 function unsupported(mode: StageOutcome["mode"], result: StageResult): LifecycleResult {
@@ -50,14 +88,17 @@ function assertNever(value: never): never {
  * never re-enters the implementation DAG. When the fix reports success the stage
  * re-verifies it through its own entry status.
  */
-function reverifyRequestingStage(status: TaskStatus): LifecycleResult {
+function reverifyRequestingStage(status: TaskStatus, failure: FailureTracking): LifecycleResult {
 	switch (status) {
+		// The failure tracking is preserved across the re-verification so that a
+		// finding that comes back is counted against the same budget instead of
+		// restarting the loop with a fresh counter.
 		case "REFACTOR":
-			return { type: "start_mode", status: "READY_FOR_REFACTOR", mode: "refactor" }
+			return { type: "start_mode", status: "READY_FOR_REFACTOR", mode: "refactor", failure }
 		case "REVIEW":
-			return { type: "start_mode", status: "READY_FOR_REVIEW", mode: "reviewer" }
+			return { type: "start_mode", status: "READY_FOR_REVIEW", mode: "reviewer", failure }
 		case "QA_READY":
-			return { type: "start_mode", status: "REVIEW_PASSED", mode: "qa" }
+			return { type: "start_mode", status: "REVIEW_PASSED", mode: "qa", failure }
 		default:
 			return invalid(`Code completion cannot be routed from lifecycle status ${status}`)
 	}
@@ -119,14 +160,17 @@ export class LifecycleController {
 				// the next ready unit); a remediation pass returns to its requesting stage.
 				return state.status === "IMPLEMENTATION"
 					? { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
-					: reverifyRequestingStage(state.status)
+					: reverifyRequestingStage(state.status, {
+							key: state.failureKey,
+							attempts: state.failureAttempts,
+						})
 
 			case "refactor":
 				switch (outcome.result) {
 					case "COMPLETED":
 						return { type: "start_mode", status: "READY_FOR_REVIEW", mode: "reviewer" }
 					case "FUNCTIONAL_DEFECT":
-						return { type: "start_mode", status: "REFACTOR", mode: "code" }
+						return startFixPass(state, outcome, { type: "start_mode", status: "REFACTOR", mode: "code" })
 					default:
 						return unsupported(outcome.mode, outcome.result)
 				}
@@ -137,7 +181,7 @@ export class LifecycleController {
 						return { type: "start_mode", status: "REVIEW_PASSED", mode: "qa" }
 					case "REQUIRED":
 					case "PRODUCTION_FIX_REQUIRED":
-						return { type: "start_mode", status: "REVIEW", mode: "code" }
+						return startFixPass(state, outcome, { type: "start_mode", status: "REVIEW", mode: "code" })
 					default:
 						return unsupported(outcome.mode, outcome.result)
 				}
@@ -149,7 +193,7 @@ export class LifecycleController {
 					case "PASSED":
 						return { type: "stop", status: "DONE", reason: "done" }
 					case "FAILED":
-						return { type: "start_mode", status: "QA_READY", mode: "code" }
+						return startFixPass(state, outcome, { type: "start_mode", status: "QA_READY", mode: "code" })
 					default:
 						return unsupported(outcome.mode, outcome.result)
 				}

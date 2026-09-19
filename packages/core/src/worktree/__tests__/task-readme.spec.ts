@@ -3,6 +3,9 @@ import * as path from "path"
 import {
 	CanonicalReadmeError,
 	CanonicalReadmeWriter,
+	clearedFailureFields,
+	NO_FAILURE_ATTEMPTS,
+	NO_FAILURE_KEY,
 	readmePath,
 	readCanonicalFields,
 	writeCanonicalFields,
@@ -20,13 +23,57 @@ Next Step: Start implementation.
 
 describe("canonical README block", () => {
 	it("reads canonical values regardless of casing and surrounding whitespace", () => {
-		const readme = "protocol version: 2\n  status:   REVIEW_PASSED  \ncurrent task: NONE\nnext step: Ship it.\n"
+		const readme =
+			"protocol version: 2\n  status:   REVIEW_PASSED  \ncurrent task: NONE\nnext step: Ship it.\nfailure key: auth-token-expiry\nfailure attempts: 2\n"
 
 		expect(readCanonicalFields(readme)).toEqual({
 			status: "REVIEW_PASSED",
 			currentTask: "NONE",
 			nextStep: "Ship it.",
+			failureKey: "auth-token-expiry",
+			failureAttempts: "2",
 		})
+	})
+
+	it("reports missing failure fields as null", () => {
+		expect(readCanonicalFields(canonicalReadme)).toEqual({
+			status: "READY_FOR_IMPLEMENTATION",
+			currentTask: "NONE",
+			nextStep: "Start implementation.",
+			failureKey: null,
+			failureAttempts: null,
+		})
+	})
+
+	it("inserts a missing failure block after the Status anchor", () => {
+		const updated = writeCanonicalFields(canonicalReadme, {
+			"Failure Key": "auth-token-expiry",
+			"Failure Attempts": "1",
+		})
+
+		expect(updated).toBe(`Protocol Version: 2
+Task: SITESUP-1116
+Status: READY_FOR_IMPLEMENTATION
+Failure Key: auth-token-expiry
+Failure Attempts: 1
+Current Task: NONE
+Next Step: Start implementation.
+`)
+	})
+
+	it("clears an active failure block with the canonical sentinels", () => {
+		const active = `${canonicalReadme}Failure Key: auth-token-expiry
+Failure Attempts: 2
+`
+
+		expect(clearedFailureFields(active)).toEqual({
+			"Failure Key": NO_FAILURE_KEY,
+			"Failure Attempts": NO_FAILURE_ATTEMPTS,
+		})
+	})
+
+	it("leaves a README without a failure block unchanged when clearing", () => {
+		expect(clearedFailureFields(canonicalReadme)).toEqual({})
 	})
 
 	it("rewrites only the named fields and preserves every other line", () => {
@@ -81,11 +128,15 @@ describe("CanonicalReadmeWriter", () => {
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
 			nextStep: "Start implementation.",
+			failureKey: null,
+			failureAttempts: null,
 		})
 		expect(update.after).toEqual({
 			status: "REVIEW_PASSED",
 			currentTask: "NONE",
 			nextStep: "Start implementation.",
+			failureKey: null,
+			failureAttempts: null,
 		})
 		expect(fileSystem.files.get(readmePath(taskRoot))).toContain("Status: REVIEW_PASSED")
 	})

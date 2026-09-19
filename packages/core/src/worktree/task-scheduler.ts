@@ -22,7 +22,13 @@ import { promises as fs } from "fs"
 import { harnessLogger } from "../observability/harness-logger.js"
 import type { HarnessLoggerPort } from "../observability/types.js"
 
-import { readCanonicalFields, readmePath, writeCanonicalFields, writeReadmeAtomic } from "./task-readme.js"
+import {
+	clearedFailureFields,
+	readCanonicalFields,
+	readmePath,
+	writeCanonicalFields,
+	writeReadmeAtomic,
+} from "./task-readme.js"
 import type { TaskContext } from "./task-resolver.js"
 import type { TaskState } from "./task-state.js"
 import {
@@ -201,6 +207,8 @@ export class TaskScheduler {
 				status: "IMPLEMENTATION",
 				currentTask: next.id,
 				currentTaskArtifact: next.artifact,
+				failureKey: null,
+				failureAttempts: 0,
 			},
 		}
 
@@ -234,10 +242,14 @@ export class TaskScheduler {
 	 * mutating an unrecognized layout is unsafe.
 	 */
 	private writeAssignment(readme: string, relativeArtifact: string, taskId: string): string | null {
+		// Handing a fresh implementation unit to Code ends any remediation that was in
+		// flight, so the failure-tracking block is cleared with the assignment rather
+		// than left behind for the next stage to misread.
 		return writeCanonicalFields(readme, {
 			Status: "IMPLEMENTATION",
 			"Current Task": relativeArtifact,
 			"Next Step": `Implement ${taskId} (${relativeArtifact}).`,
+			...clearedFailureFields(readme),
 		})
 	}
 }

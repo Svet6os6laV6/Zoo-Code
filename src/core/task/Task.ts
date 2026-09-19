@@ -4580,6 +4580,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						status: "ANALYSIS",
 						currentTask: null,
 						currentTaskArtifact: null,
+						failureKey: null,
+						failureAttempts: 0,
 					}
 				}
 

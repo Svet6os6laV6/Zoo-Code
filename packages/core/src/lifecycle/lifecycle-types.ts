@@ -1,5 +1,6 @@
 import { z } from "zod"
 
+import { NO_FAILURE_KEY } from "../worktree/task-readme.js"
 import type { TaskStatus } from "../worktree/task-state.js"
 
 /**
@@ -28,6 +29,14 @@ export const STAGE_RESULTS = [
  */
 export const STAGE_RESULT_MARKER = "Stage Result:"
 
+/**
+ * The optional `Failure Key` protocol marker. A failing stage may name the
+ * finding it could not satisfy with a stable semantic id; the harness — not the
+ * model — counts the fix passes spent on that id. Both the instruction and the
+ * parser derive from this constant.
+ */
+export const STAGE_FAILURE_KEY_MARKER = "Failure Key:"
+
 const lifecycleModeSchema = z.enum(LIFECYCLE_MODES)
 const stageResultSchema = z.enum(STAGE_RESULTS)
 
@@ -38,17 +47,51 @@ export type StageResult = z.infer<typeof stageResultSchema>
 export type StageOutcome = {
 	readonly mode: LifecycleMode
 	readonly result: StageResult
+	/**
+	 * Semantic id of the finding the stage is reporting on, or `null` when the
+	 * stage named none. A model may choose the id, but only the controller counts
+	 * the attempts against it.
+	 */
+	readonly failureKey: string | null
+}
+
+/**
+ * How many fix passes the harness has spent on one finding.
+ *
+ * The key is the semantic id a failing stage may report; the count is owned by
+ * the controller, never by the model. A `null` key means the stage named no
+ * finding, which still forms its own bucket so an unnamed loop is bounded too.
+ */
+export type FailureTracking = {
+	readonly key: string | null
+	readonly attempts: number
 }
 
 export type LifecycleResult =
-	| { readonly type: "start_mode"; readonly status: TaskStatus; readonly mode: LifecycleMode }
+	| {
+			readonly type: "start_mode"
+			readonly status: TaskStatus
+			readonly mode: LifecycleMode
+			/** Present when the decision must preserve or update failure tracking. */
+			readonly failure?: FailureTracking
+	  }
 	| { readonly type: "schedule_implementation"; readonly status: TaskStatus }
-	| { readonly type: "stop"; readonly status: TaskStatus; readonly reason: "done" | "pending" | "blocked" }
+	| {
+			readonly type: "stop"
+			readonly status: TaskStatus
+			readonly reason: "done" | "pending" | "blocked" | "max-attempts"
+			/** Present when a max-attempts stop must surface the exhausted finding. */
+			readonly failure?: FailureTracking
+	  }
 	| { readonly type: "invalid"; readonly reason: string }
 
 export type ModeRunResult =
 	| { readonly type: "started"; readonly mode: LifecycleMode; readonly status: TaskStatus }
-	| { readonly type: "stopped"; readonly status: TaskStatus; readonly reason: "done" | "pending" | "blocked" }
+	| {
+			readonly type: "stopped"
+			readonly status: TaskStatus
+			readonly reason: "done" | "pending" | "blocked" | "max-attempts"
+	  }
 	| { readonly type: "invalid"; readonly reason: string }
 
 export class LifecycleError extends Error {
@@ -61,6 +104,9 @@ function escapeForRegExp(value: string): string {
 
 /** Built from {@link STAGE_RESULT_MARKER}; global so `matchAll` can count matches. */
 const STAGE_RESULT_PATTERN = new RegExp(`^\\s*${escapeForRegExp(STAGE_RESULT_MARKER)}\\s*(\\S+)\\s*$`, "gim")
+
+/** Built from {@link STAGE_FAILURE_KEY_MARKER}; global so `matchAll` can count matches. */
+const STAGE_FAILURE_KEY_PATTERN = new RegExp(`^\\s*${escapeForRegExp(STAGE_FAILURE_KEY_MARKER)}\\s*(\\S+)\\s*$`, "gim")
 
 /**
  * Read the outcome a stage reported, or `null` when the reply carries no
@@ -82,6 +128,19 @@ export function parseStageOutcome(mode: string, text: string): StageOutcome | nu
 		return null
 	}
 
+	// The failure key is optional, but not ambiguous: a reply that names two
+	// findings cannot be attributed to one remediation loop, so it is rejected like
+	// a missing or duplicated `Stage Result`. The canonical `NONE` sentinel means
+	// "no key" rather than a literal id.
+	const failureKeyMatches = [...text.matchAll(STAGE_FAILURE_KEY_PATTERN)]
+	if (failureKeyMatches.length > 1) {
+		return null
+	}
+
+	const rawFailureKey = failureKeyMatches[0]?.[1]
+	const failureKey =
+		rawFailureKey === undefined || rawFailureKey.toUpperCase() === NO_FAILURE_KEY ? null : rawFailureKey
+
 	const parsedResult = stageResultSchema.safeParse(matches[0]?.[1]?.toUpperCase())
-	return parsedResult.success ? { mode: parsedMode.data, result: parsedResult.data } : null
+	return parsedResult.success ? { mode: parsedMode.data, result: parsedResult.data, failureKey } : null
 }

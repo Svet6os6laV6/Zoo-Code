@@ -27,6 +27,10 @@ export type TaskState = {
 	readonly status: TaskStatus
 	readonly currentTask: string | null
 	readonly currentTaskArtifact: string | null
+	/** Semantic id of the failure currently being remediated, or `null` when no fix pass is running. */
+	readonly failureKey: string | null
+	/** Fix passes already spent on {@link failureKey}; `0` when no fix pass is running. */
+	readonly failureAttempts: number
 }
 
 type TaskStateFileSystem = {
@@ -130,6 +134,8 @@ export class TaskStateResolver {
 					status: "ANALYSIS",
 					currentTask: null,
 					currentTaskArtifact: null,
+					failureKey: null,
+					failureAttempts: 0,
 				}
 				decide(state, "task README does not exist yet; a new task starts in ANALYSIS", "missing-readme")
 				return state
@@ -156,6 +162,19 @@ export class TaskStateResolver {
 
 		const normalizedStatus = rawStatus !== statusValue
 
+		// The failure-tracking block is read once, before any state is built, so every
+		// exit path carries the same counter semantics instead of re-parsing the fields.
+		// The canonical `NONE` sentinel means "no active failure", never a real key.
+		const rawFailureKey = readField(readme, "Failure Key")
+		const failureKey = rawFailureKey === undefined || rawFailureKey === "NONE" ? null : rawFailureKey
+		const rawFailureAttempts = readField(readme, "Failure Attempts")
+		if (rawFailureAttempts !== undefined && !/^\d+$/.test(rawFailureAttempts)) {
+			const message = `Invalid Failure Attempts: ${rawFailureAttempts}`
+			decide(null, message, "invalid-failure-attempts", { rawFailureAttempts }, "warn")
+			throw new TaskStateError(message)
+		}
+		const failureAttempts = rawFailureAttempts === undefined ? 0 : Number.parseInt(rawFailureAttempts, 10)
+
 		const currentTaskValue = readField(readme, "Current Task")
 		if (!currentTaskValue) {
 			if (!isProtocolV2) {
@@ -164,6 +183,8 @@ export class TaskStateResolver {
 					status: statusValue,
 					currentTask: null,
 					currentTaskArtifact: null,
+					failureKey,
+					failureAttempts,
 				}
 				decide(
 					state,
@@ -189,6 +210,8 @@ export class TaskStateResolver {
 				status: statusValue,
 				currentTask: null,
 				currentTaskArtifact: null,
+				failureKey,
+				failureAttempts,
 			}
 			decide(state, "README declares no current implementation unit", "no-current-task", { normalizedStatus })
 			return state
@@ -218,6 +241,8 @@ export class TaskStateResolver {
 			status: statusValue,
 			currentTask,
 			currentTaskArtifact: path.join(context.taskRoot, ...currentTaskValue.split("/")),
+			failureKey,
+			failureAttempts,
 		}
 		decide(state, "README resolved to an implementation unit", "resolved", {
 			normalizedStatus,

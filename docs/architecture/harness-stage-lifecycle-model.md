@@ -17,6 +17,7 @@ graph TD
     HMR[HarnessModeRunner]
     LC[LifecycleController]
     MR[ModeRunner]
+    SI[Stage instructions]
     TS[TaskScheduler]
     TSR[TaskStateResolver]
     RW[CanonicalReadmeWriter]
@@ -25,19 +26,22 @@ graph TD
     HMR --> TSR
     HMR --> MR
     MR --> LC
+    MR --> SI
     MR --> TS
     MR --> RW
     TSR --> RW
     TS --> RW
 ```
 
-| Layer           | Location                                                                                         | Responsibility                                                                                                   |
-| --------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| Integration     | [`ClineProvider.reopenParentFromDelegation`](../../src/core/webview/ClineProvider.ts:4415)       | After a subtask child completes, delegate the next stage. Falls back to the legacy parent resume on any failure. |
-| Adapter         | [`src/core/harness/mode-runner.ts`](../../src/core/harness/mode-runner.ts:21)                    | Resolve the runtime `TaskContext`, parse the stage report, call the controller, apply the decision.              |
-| Domain          | [`packages/core/src/lifecycle`](../../packages/core/src/lifecycle/index.ts:1)                    | Pure routing (`LifecycleController`), effects (`ModeRunner`), protocol parsing (`parseStageOutcome`).            |
-| Canonical state | [`packages/core/src/worktree/task-state.ts`](../../packages/core/src/worktree/task-state.ts:36)  | The status vocabulary and the canonical transition table.                                                        |
-| Canonical I/O   | [`packages/core/src/worktree/task-readme.ts`](../../packages/core/src/worktree/task-readme.ts:1) | The only writer of the harness-owned README block.                                                               |
+| Layer              | Location                                                                                                         | Responsibility                                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Integration        | [`ClineProvider.reopenParentFromDelegation`](../../src/core/webview/ClineProvider.ts:4415)                       | After a subtask child completes, delegate the next stage. Falls back to the legacy parent resume on any failure. |
+| Adapter            | [`src/core/harness/mode-runner.ts`](../../src/core/harness/mode-runner.ts:21)                                    | Resolve the runtime `TaskContext`, parse the stage report, call the controller, apply the decision.              |
+| Domain             | [`packages/core/src/lifecycle`](../../packages/core/src/lifecycle/index.ts:1)                                    | Pure routing (`LifecycleController`), effects (`ModeRunner`), protocol parsing (`parseStageOutcome`).            |
+| Stage instructions | [`packages/core/src/lifecycle/stage-instructions.ts`](../../packages/core/src/lifecycle/stage-instructions.ts:1) | The declared artifacts and directive a stage start is composed from.                                             |
+| Canonical state    | [`packages/core/src/worktree/task-state.ts`](../../packages/core/src/worktree/task-state.ts:36)                  | The status vocabulary, the failure-tracking fields, and the canonical transition table.                          |
+| Canonical I/O      | [`packages/core/src/worktree/task-readme.ts`](../../packages/core/src/worktree/task-readme.ts:1)                 | The only writer of the harness-owned README block.                                                               |
+| Stage modes        | [`DEFAULT_MODES`](../../packages/types/src/mode.ts:174)                                                          | The `reviewer`/`qa`/`refactor` modes exist out of the box with their tool capabilities.                          |
 
 ## The model has two halves, and they must agree
 
@@ -95,8 +99,51 @@ the exported constant `STAGE_RESULT_MARKER`, and both sides are derived from it:
 `ModeRunner` sends and the pattern `parseStageOutcome` matches. The mode itself is never taken from
 the reply — it comes from the runtime child history — so a model cannot route the lifecycle.
 
-Parsing is deliberately strict: an unknown mode, an unknown result, a missing marker, or more than
-one marker line all yield `null`, which sends the caller down its pre-existing parent-resume path.
+A failing stage may additionally name the finding it could not satisfy with one optional
+`Failure Key: <id>` line (`STAGE_FAILURE_KEY_MARKER`). The id is the model's to choose; everything
+that follows from it is the harness's.
+
+Parsing is deliberately strict: an unknown mode, an unknown result, a missing marker, more than one
+marker line, or more than one failure-key line all yield `null`, which sends the caller down its
+pre-existing parent-resume path.
+
+## The stage instruction
+
+The message that starts a stage is a pointer, not a payload. `buildStageInstruction` composes it from
+`STAGE_ARTIFACTS` (the paths relative to the task artifact directory the stage works from) and
+`STAGE_DIRECTIVES` (one line describing the stage's responsibility). The assigned implementation unit
+is appended as a task-relative path when one exists, and a fix pass adds the failure line so the stage
+repeats the same key. Canonical README state already reaches every mode through the system prompt, so
+it is not duplicated here. Adding a stage is a row in those two tables, not new prose in the runner.
+
+## Failure tracking and the attempt budget
+
+The README carries two harness-owned fields beyond the status: `Failure Key` and `Failure Attempts`.
+The controller — never the model — owns the count:
+
+- A fix-pass decision (`reviewer` `REQUIRED`/`PRODUCTION_FIX_REQUIRED`, `refactor`
+  `FUNCTIONAL_DEFECT`, `qa` `FAILED`) attributes the pass to `outcome.failureKey ?? state.failureKey`
+  and increments the counter. A different key starts a fresh count of `1`; a missing key still forms
+  its own bucket (stored as the canonical `NONE`), so an unnamed loop is bounded by the same budget.
+- A completed fix pass preserves the tracking while the requesting stage re-verifies, so a finding
+  that comes back is counted against the same key instead of restarting the loop.
+- Every other decision advances the lifecycle and clears the block (`NONE` / `0`).
+
+When the next pass would exceed `MAX_FAILURE_ATTEMPTS`, the controller does not start it: it returns
+`stop` at `BLOCKED` with reason `max-attempts`, carrying the exhausted key and the spent count so the
+user sees exactly which finding blocked the task. The budget is a code constant, never a prompt
+instruction, so it holds even when the model keeps proposing the same remedy.
+
+## Mode capabilities
+
+The lifecycle modes are built-in (`DEFAULT_MODES`), so `startMode` finds `reviewer`, `qa`, and
+`refactor` without project configuration; custom modes still override them, because `getModeBySlug`
+consults custom modes first. Capability enforcement uses the existing tool-group mechanism rather than
+a new one: `reviewer` and `qa` get `read`, `command`, and an `edit` group restricted to `\.md$`, so a
+reviewer that tries to touch production code is rejected with `FileRestrictionError`. `refactor` gets
+the full `edit` and `command` groups. This is the runtime half of "reviewer must not modify production
+code": the rule is still worth stating in the mode's instructions, but the tool is not available to
+violate it.
 
 ## Failure semantics
 
@@ -109,6 +156,8 @@ Everything that can go wrong degrades to the legacy behaviour instead of failing
 | Selected mode is not configured                            | `startMode` throws `LifecycleError`; the parent resumes as before.    |
 | README has no canonical `Status` line                      | `LifecycleError`; the parent resumes as before.                       |
 | Scheduler cannot produce a next stage                      | `invalid`; the parent resumes as before.                              |
+
+| Attempt budget exhausted (`max-attempts`) | `stop` at `BLOCKED`; the parent resumes as before. |
 
 ## Where the invariants are enforced
 
@@ -137,9 +186,14 @@ it belongs to a deliberate wording decision rather than to this model. If you do
 - **New stage outcome** — add the result to `STAGE_RESULTS`, handle it in `LifecycleController.decide`
   (the exhaustive `switch` makes an unhandled result a type error), then extend the spec tables.
 - **New canonical README field** — add it to `CANONICAL_README_FIELDS` in `task-readme.ts` so both
-  writers stay consistent, and pass it explicitly from each caller.
-- **New stage** — add the mode to `LIFECYCLE_MODES` and give it a row in `MODE_STATUSES`. The
-  routability guard requires at least one real outcome to be handled for every claimed status.
+  writers stay consistent, extend `readCanonicalFields` and the resolver, and pass it explicitly from
+  each caller. A field that no writer sets must be inserted by naming a canonical sentinel, because
+  the writer replaces and inserts but never deletes.
+- **New stage** — add the mode to `LIFECYCLE_MODES`, give it a row in `MODE_STATUSES`, a capability
+  profile in `DEFAULT_MODES`, and a row in `STAGE_ARTIFACTS`/`STAGE_DIRECTIVES`. The routability guard
+  requires at least one real outcome to be handled for every claimed status.
+- **New attempt policy** — change `MAX_FAILURE_ATTEMPTS` or the attribution rule in `startFixPass`;
+  everything downstream persists whatever the controller returns.
 
 Do not add a second writer for the README block or a second source of transition truth; the drift
 guards exist because the two halves of this model were previously maintained separately.

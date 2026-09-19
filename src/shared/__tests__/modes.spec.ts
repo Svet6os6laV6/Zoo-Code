@@ -925,3 +925,36 @@ describe("getModeSelection", () => {
 		expect(selection.baseInstructions).toBe(promptComponentAsk.customInstructions)
 	})
 })
+
+describe("harness lifecycle modes", () => {
+	it("restricts reviewer and QA to markdown artifacts", () => {
+		for (const mode of ["reviewer", "qa"]) {
+			expect(
+				isToolAllowedForMode("write_to_file", mode, [], undefined, {
+					path: "review-report.md",
+					content: "findings",
+				}),
+			).toBe(true)
+			expect(() =>
+				isToolAllowedForMode("write_to_file", mode, [], undefined, {
+					path: "src/production.ts",
+					content: "// edit",
+				}),
+			).toThrow(FileRestrictionError)
+		}
+	})
+
+	it("gives refactor full production write access", () => {
+		expect(
+			isToolAllowedForMode("write_to_file", "refactor", [], undefined, {
+				path: "src/production.ts",
+				content: "// edit",
+			}),
+		).toBe(true)
+	})
+
+	it("lets reviewer and QA run project commands", () => {
+		expect(isToolAllowedForMode("execute_command", "reviewer", [])).toBe(true)
+		expect(isToolAllowedForMode("execute_command", "qa", [])).toBe(true)
+	})
+})

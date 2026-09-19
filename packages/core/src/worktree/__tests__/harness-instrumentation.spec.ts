@@ -46,6 +46,8 @@ function state(overrides: Partial<TaskState> = {}): TaskState {
 		status: "READY_FOR_IMPLEMENTATION",
 		currentTask: null,
 		currentTaskArtifact: null,
+		failureKey: null,
+		failureAttempts: 0,
 		...overrides,
 	}
 }
@@ -223,12 +225,37 @@ describe("TaskScheduler instrumentation", () => {
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
 			nextStep: "Start implementation.",
+			failureKey: null,
+			failureAttempts: null,
 		})
 		expect(mutation?.stateAfter).toEqual({
 			status: "IMPLEMENTATION",
 			currentTask: "implementation/T02-worker.md",
 			nextStep: "Implement T02 (implementation/T02-worker.md).",
+			failureKey: null,
+			failureAttempts: null,
 		})
+	})
+
+	it("clears a stale failure block when a fresh implementation unit is assigned", async () => {
+		const logger = new RecordingHarnessLogger()
+		const readmeWithFailure = `Protocol Version: 2
+Task: SITESUP-1116
+Status: READY_FOR_IMPLEMENTATION
+Current Task: NONE
+Next Step: Start implementation.
+Failure Key: auth-token-expiry
+Failure Attempts: 2
+`
+		const fileSystem = createInMemoryFileSystem(files(readmeWithFailure, DAG))
+		const scheduler = new TaskScheduler(fileSystem, new TxxParser(fileSystem), logger)
+
+		const assignment = await scheduler.assignNext(taskContext, state())
+
+		expect(assignment?.state).toMatchObject({ failureKey: null, failureAttempts: 0 })
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Failure Key: NONE")
+		expect(readme).toContain("Failure Attempts: 0")
 	})
 
 	it("records why a lifecycle stage does not execute implementation units", async () => {

@@ -23,6 +23,8 @@ const state: TaskState = {
 	status: "REVIEW",
 	currentTask: null,
 	currentTaskArtifact: null,
+	failureKey: null,
+	failureAttempts: 0,
 }
 
 describe("HarnessModeRunner", () => {
@@ -51,7 +53,7 @@ describe("HarnessModeRunner", () => {
 			"Review complete.\nStage Result: PASSED\nNext Mode: code",
 		)
 
-		expect(transition).toHaveBeenCalledWith(state, { mode: "reviewer", result: "PASSED" })
+		expect(transition).toHaveBeenCalledWith(state, { mode: "reviewer", result: "PASSED", failureKey: null })
 		expect(run).toHaveBeenCalledWith(context, state, expectedDecision)
 		expect(result).toEqual(expectedResult)
 	})

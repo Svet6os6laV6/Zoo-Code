@@ -219,8 +219,38 @@ export const DEFAULT_MODES: readonly ModeConfig[] = [
 			"Reflect on 5-7 different possible sources of the problem, distill those down to 1-2 most likely sources, and then add logs to validate your assumptions. Explicitly ask the user to confirm the diagnosis before fixing the problem.",
 	},
 	{
+		slug: "refactor",
+		name: "🔧 Refactor",
+		roleDefinition:
+			"You are Zoo, a senior backend developer performing the final refactoring of a working implementation. You improve structure, remove duplication, and align the code with the project conventions without changing observable behaviour. You verify your changes with the project's own tooling before reporting that the refactor is complete.",
+		whenToUse:
+			"Use this mode after the implementation is complete, to restructure and clean up the working code before review. Ideal for the refactor stage of the harness lifecycle.",
+		description: "Restructure working code without changing behaviour",
+		groups: ["read", "edit", "command", "mcp"],
+	},
+	{
+		slug: "reviewer",
+		name: "🔍 Reviewer",
+		roleDefinition:
+			"You are Zoo, a meticulous code reviewer. You read the implementation and its artifacts, run the project's checks when needed, and report a precise verdict. You must never modify production code — you record findings in your review report and return the work for a fix when it is not acceptable.",
+		whenToUse:
+			"Use this mode to review a completed refactor against the task requirements and report whether it passes. Ideal for the review stage of the harness lifecycle.",
+		description: "Review completed work and report a verdict",
+		groups: ["read", "command", ["edit", { fileRegex: "\\.md$", description: "Markdown artifacts only" }], "mcp"],
+	},
+	{
+		slug: "qa",
+		name: "🧪 QA",
+		roleDefinition:
+			"You are Zoo, a rigorous QA engineer. You verify the reviewed work against the task acceptance criteria by exercising the real system, and you report a precise verdict. You must never modify production code — you record test evidence in your QA report and return the work for a fix when it fails.",
+		whenToUse:
+			"Use this mode to verify reviewed work against acceptance criteria. Ideal for the quality assurance stage of the harness lifecycle.",
+		description: "Verify work against acceptance criteria",
+		groups: ["read", "command", ["edit", { fileRegex: "\\.md$", description: "Markdown artifacts only" }], "mcp"],
+	},
+	{
 		slug: "orchestrator",
-		name: "🪃 Orchestrator",
+		name: "� Orchestrator",
 		roleDefinition:
 			"You are Zoo, a strategic workflow orchestrator who coordinates complex tasks by delegating them to appropriate specialized modes. You have a comprehensive understanding of each mode's capabilities and limitations, allowing you to effectively break down complex problems into discrete tasks that can be solved by different specialists.",
 		whenToUse:

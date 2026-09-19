@@ -19,12 +19,24 @@ export const README_FILENAME = "README.md"
 /** Canonical value declaring that no implementation unit is assigned. */
 export const NO_CURRENT_TASK = "NONE"
 
+/** Canonical value declaring that no failure is currently being remediated. */
+export const NO_FAILURE_KEY = "NONE"
+
+/** Canonical value declaring that no fix pass has been spent on a failure. */
+export const NO_FAILURE_ATTEMPTS = "0"
+
 /**
  * Canonical fields in the order a missing field is inserted. The `Status` line
  * is the anchor: a README without it is left untouched, because mutating an
  * unrecognized layout is unsafe.
  */
-export const CANONICAL_README_FIELDS = ["Status", "Current Task", "Next Step"] as const
+export const CANONICAL_README_FIELDS = [
+	"Status",
+	"Current Task",
+	"Next Step",
+	"Failure Key",
+	"Failure Attempts",
+] as const
 
 export type CanonicalReadmeField = (typeof CANONICAL_README_FIELDS)[number]
 
@@ -36,6 +48,8 @@ export type CanonicalReadmeSnapshot = {
 	readonly status: string | null
 	readonly currentTask: string | null
 	readonly nextStep: string | null
+	readonly failureKey: string | null
+	readonly failureAttempts: string | null
 }
 
 /** The file capabilities both the scheduler and the lifecycle runner need. */
@@ -86,6 +100,8 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
 		status: readField(lines, "Status"),
 		currentTask: readField(lines, "Current Task"),
 		nextStep: readField(lines, "Next Step"),
+		failureKey: readField(lines, "Failure Key"),
+		failureAttempts: readField(lines, "Failure Attempts"),
 	}
 }
 
@@ -96,6 +112,24 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
  * absent from the README is inserted after the `Status` line in canonical order,
  * so the block stays readable instead of accumulating fields in arbitrary places.
  */
+/**
+ * The fields that clear an active failure-tracking block, or an empty object when
+ * the README carries no failure fields.
+ *
+ * Clearing is expressed as canonical sentinels (`NONE` / `0`) because the writer
+ * only replaces and inserts fields — it never deletes lines. Returning `{}` when
+ * the block is already absent keeps fresh READMEs from growing two empty fields.
+ */
+export function clearedFailureFields(readme: string): CanonicalReadmeFields {
+	const fields = readCanonicalFields(readme)
+
+	if (fields.failureKey === null && fields.failureAttempts === null) {
+		return {}
+	}
+
+	return { "Failure Key": NO_FAILURE_KEY, "Failure Attempts": NO_FAILURE_ATTEMPTS }
+}
+
 export function writeCanonicalFields(readme: string, fields: CanonicalReadmeFields): string | null {
 	const lines = readme.split(/\r?\n/)
 	const statusIndex = findFieldIndex(lines, "Status")

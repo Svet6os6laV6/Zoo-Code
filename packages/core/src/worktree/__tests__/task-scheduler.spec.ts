@@ -58,6 +58,8 @@ function state(overrides: Partial<TaskState> = {}): TaskState {
 		status: "READY_FOR_IMPLEMENTATION",
 		currentTask: null,
 		currentTaskArtifact: null,
+		failureKey: null,
+		failureAttempts: 0,
 		...overrides,
 	}
 }

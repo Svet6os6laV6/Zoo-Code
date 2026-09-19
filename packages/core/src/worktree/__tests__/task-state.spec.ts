@@ -27,7 +27,42 @@ Next Step: Implement T02.
 			status: "IMPLEMENTATION",
 			currentTask: "T02",
 			currentTaskArtifact: path.join(taskContext.taskRoot, "implementation", "T02-worker-heartbeat.md"),
+			failureKey: null,
+			failureAttempts: 0,
 		})
+	})
+
+	it("reads failure tracking and treats the NONE sentinel as no key", async () => {
+		const state = await resolverFor(`Protocol Version: 2
+Task: SITESUP-1116
+Status: REVIEW
+Current Task: NONE
+Failure Key: auth-token-expiry
+Failure Attempts: 2
+`).resolve(taskContext)
+
+		expect(state).toMatchObject({ failureKey: "auth-token-expiry", failureAttempts: 2 })
+
+		const cleared = await resolverFor(`Protocol Version: 2
+Task: SITESUP-1116
+Status: REVIEW
+Current Task: NONE
+Failure Key: NONE
+Failure Attempts: 0
+`).resolve(taskContext)
+
+		expect(cleared).toMatchObject({ failureKey: null, failureAttempts: 0 })
+	})
+
+	it("rejects a non-numeric failure attempt counter", async () => {
+		await expect(
+			resolverFor(`Protocol Version: 2
+Task: SITESUP-1116
+Status: REVIEW
+Current Task: NONE
+Failure Attempts: many
+`).resolve(taskContext),
+		).rejects.toEqual(new TaskStateError("Invalid Failure Attempts: many"))
 	})
 
 	it("represents a new task without README as analysis", async () => {
@@ -42,6 +77,8 @@ Next Step: Implement T02.
 			status: "ANALYSIS",
 			currentTask: null,
 			currentTaskArtifact: null,
+			failureKey: null,
+			failureAttempts: 0,
 		})
 	})
 
@@ -85,6 +122,8 @@ Current Task: NONE
 			status: "DONE",
 			currentTask: null,
 			currentTaskArtifact: null,
+			failureKey: null,
+			failureAttempts: 0,
 		})
 	})
 
@@ -94,6 +133,8 @@ Current Task: NONE
 			status: "IMPLEMENTATION",
 			currentTask: null,
 			currentTaskArtifact: null,
+			failureKey: null,
+			failureAttempts: 0,
 		})
 	})
 

@@ -11,12 +11,19 @@ const readmePath = path.join(taskRoot, "README.md")
 const implementation = path.join(taskRoot, "implementation")
 const context: TaskContext = { taskId: "SITESUP-1116", branch: "feature/SITESUP-1116", taskRoot }
 
-function state(status: TaskState["status"], currentTask: string | null = null): TaskState {
+function state(
+	status: TaskState["status"],
+	currentTask: string | null = null,
+	overrides: Partial<TaskState> = {},
+): TaskState {
 	return {
 		taskId: context.taskId,
 		status,
 		currentTask,
 		currentTaskArtifact: currentTask ? path.join(implementation, `${currentTask}-unit.md`) : null,
+		failureKey: null,
+		failureAttempts: 0,
+		...overrides,
 	}
 }
 
@@ -162,6 +169,71 @@ describe("ModeRunner", () => {
 		expect(parseStageOutcome("qa", `${instruction}\nStage Result: PASSED`)).toEqual({
 			mode: "qa",
 			result: "PASSED",
+			failureKey: null,
 		})
+	})
+
+	it("persists the failure block when the controller starts a fix pass", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: READY_FOR_REVIEW\nCurrent Task: NONE\n",
+		})
+		const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem)
+
+		await runner.run(context, state("READY_FOR_REVIEW"), {
+			type: "start_mode",
+			status: "REVIEW",
+			mode: "code",
+			failure: { key: "auth-token-expiry", attempts: 2 },
+		})
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Status: REVIEW")
+		expect(readme).toContain("Failure Key: auth-token-expiry")
+		expect(readme).toContain("Failure Attempts: 2")
+	})
+
+	it("clears the failure block when a stage advances", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: REVIEW\nCurrent Task: NONE\nFailure Key: auth-token-expiry\nFailure Attempts: 2\n",
+		})
+		const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem)
+
+		await runner.run(context, state("REVIEW"), {
+			type: "start_mode",
+			status: "READY_FOR_REVIEW",
+			mode: "reviewer",
+		})
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Status: READY_FOR_REVIEW")
+		expect(readme).toContain("Failure Key: NONE")
+		expect(readme).toContain("Failure Attempts: 0")
+	})
+
+	it("points Code at the assigned implementation unit", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: IMPLEMENTATION\nCurrent Task: implementation/T01-unit.md\n",
+			[path.join(implementation, "T01-unit.md")]: "## Status\nStatus: DONE\n",
+			[path.join(implementation, "T02-unit.md")]:
+				"## Status\nStatus: TODO\n\n## Relationships\n\n- Depends on: T01\n",
+		})
+		const messages: string[] = []
+		const runner = new ModeRunner(
+			async (_mode, message) => {
+				messages.push(message)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		await runner.run(context, state("IMPLEMENTATION", "T01"), {
+			type: "schedule_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		const instruction = messages[0] ?? ""
+		expect(instruction).toContain("implementation/T02-unit.md")
 	})
 })
