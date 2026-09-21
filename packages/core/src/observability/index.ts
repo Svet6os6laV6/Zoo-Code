@@ -39,6 +39,13 @@ export {
 export { OutputChannelSink, type HarnessOutputChannel, type OutputChannelSinkOptions } from "./output-channel-sink.js"
 
 export {
+	BroadcastSink,
+	DEFAULT_BROADCAST_CAPACITY,
+	type BroadcastSinkListener,
+	type BroadcastSinkOptions,
+} from "./broadcast-sink.js"
+
+export {
 	JsonlSink,
 	DEFAULT_JSONL_MAX_ARCHIVES,
 	DEFAULT_JSONL_MAX_BYTES,

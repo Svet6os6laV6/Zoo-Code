@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Zoo Code Harness Log Viewer</title>
+	<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+	<div id="app">
+		<aside id="sidebar">
+			<div class="sidebar-header">
+				<h1>Harness Logs</h1>
+				<button id="refresh-sessions" type="button" class="button">Refresh</button>
+			</div>
+			<div id="session-list" class="session-list" aria-label="Log sessions"></div>
+			<div id="sidebar-message" class="sidebar-message" hidden></div>
+		</aside>
+
+		<main id="main">
+			<header id="toolbar">
+				<div class="filters">
+					<fieldset id="level-filters" class="filter-group">
+						<legend>Level</legend>
+						<label class="level-option"><input type="checkbox" value="debug" checked> debug</label>
+						<label class="level-option"><input type="checkbox" value="info" checked> info</label>
+						<label class="level-option"><input type="checkbox" value="warn" checked> warn</label>
+						<label class="level-option"><input type="checkbox" value="error" checked> error</label>
+					</fieldset>
+
+					<label class="filter-field">
+						<span>Kind</span>
+						<select id="kind-filter">
+							<option value="">all</option>
+							<option value="event">event</option>
+							<option value="span">span</option>
+							<option value="decision">decision</option>
+							<option value="mutation">mutation</option>
+						</select>
+					</label>
+
+					<label class="filter-field">
+						<span>Task</span>
+						<input id="task-filter" type="text" placeholder="taskId" autocomplete="off">
+					</label>
+
+					<label class="filter-field">
+						<span>Txx</span>
+						<input id="txx-filter" type="text" placeholder="txxId" autocomplete="off">
+					</label>
+
+					<label class="filter-field">
+						<span>Mode</span>
+						<input id="mode-filter" type="text" placeholder="mode" autocomplete="off">
+					</label>
+
+					<label class="filter-field filter-search">
+						<span>Search</span>
+						<input id="search-filter" type="text" placeholder="name, reason, payload" autocomplete="off">
+					</label>
+				</div>
+
+				<div class="status-bar">
+					<span id="connection-status" class="status status-disconnected">disconnected</span>
+					<button id="pause-button" type="button" class="button" disabled>Pause</button>
+				</div>
+			</header>
+
+			<div id="records" class="records" tabindex="0"></div>
+
+			<footer id="records-footer">
+				<button id="load-more" type="button" class="button" hidden>Load more</button>
+				<span id="records-count" class="records-count"></span>
+			</footer>
+		</main>
+	</div>
+
+	<script src="/app.js"></script>
+</body>
+</html>

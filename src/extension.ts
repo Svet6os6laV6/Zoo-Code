@@ -25,6 +25,7 @@ import {
 	initializeHarnessLogging,
 	type HarnessLoggingHandle,
 } from "./core/harness/harness-logging"
+import { closeLogViewerServer, getOrCreateLogViewerServer } from "./core/harness/log-viewer/server"
 
 import "./utils/path" // Necessary to have access to String.prototype.toPosix.
 import { createOutputChannelLogger, createDualLogger } from "./utils/outputChannelLogger"
@@ -71,6 +72,36 @@ let harnessLogging: HarnessLoggingHandle | undefined
 let cloudService: CloudService | undefined
 
 let settingsUpdatedHandler: (() => void) | undefined
+
+/**
+ * Opens the harness log viewer in the system browser. The server starts lazily
+ * on the first run and keeps running until `deactivate()`; a server failure is
+ * reported to the output channel and never affects the harness.
+ */
+async function openHarnessLogViewer(): Promise<void> {
+	if (!harnessLogging) {
+		outputChannel.appendLine("[harness] Log viewer unavailable: harness logging is not initialized")
+		return
+	}
+
+	try {
+		const server = await getOrCreateLogViewerServer({
+			logsDirectory: path.dirname(harnessLogging.jsonlPath),
+			broadcast: harnessLogging.broadcast,
+			activeSessionId: harnessLogging.sessionId,
+			// Static viewer assets are shipped unbundled; `.vscodeignore` keeps
+			// `core/harness/log-viewer/public` inside the packaged extension.
+			publicDirectory: path.join(extensionContext.extensionPath, "core", "harness", "log-viewer", "public"),
+		})
+
+		outputChannel.appendLine(`[harness] Log viewer available at ${server.url}`)
+		await vscode.env.openExternal(vscode.Uri.parse(server.url))
+	} catch (error) {
+		outputChannel.appendLine(
+			`[harness] Failed to start log viewer: ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
+}
 
 /**
  * Check if we should auto-open the Zoo Code sidebar after switching to a worktree.
@@ -145,6 +176,14 @@ export async function activate(context: vscode.ExtensionContext) {
 			`[harness] Failed to initialize harness logging: ${error instanceof Error ? error.message : String(error)}`,
 		)
 	}
+
+	// Local harness log viewer: the server starts lazily on the first command
+	// run and is stopped in `deactivate()`.
+	context.subscriptions.push(
+		vscode.commands.registerCommand("zoo-code.openHarnessLogViewer", () => {
+			void openHarnessLogViewer()
+		}),
+	)
 
 	// Initialize network proxy configuration early, before any network requests.
 	// When proxyUrl is configured, all HTTP/HTTPS traffic will be routed through it.
@@ -414,6 +453,16 @@ export async function deactivate() {
 	} catch (error) {
 		outputChannel.appendLine(
 			`[harness] Failed to flush harness logging: ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
+
+	// Stop the log viewer server if the command ever started it. Close errors
+	// are swallowed inside the server; this guard is belt-and-braces.
+	try {
+		await closeLogViewerServer()
+	} catch (error) {
+		outputChannel.appendLine(
+			`[harness] Failed to close log viewer: ${error instanceof Error ? error.message : String(error)}`,
 		)
 	}
 
