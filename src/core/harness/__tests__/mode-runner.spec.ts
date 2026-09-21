@@ -5,6 +5,8 @@ import {
 	ModeRunner,
 	TaskScheduler,
 	TaskStateResolver,
+	type ArtifactValidationReport,
+	type ImplementationArtifacts,
 	type LifecycleResult,
 	type ModeRunResult,
 	type TaskContext,
@@ -43,7 +45,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(state) },
-			controller: { transition, resume: vi.fn() },
+			controller: { transition, resume: vi.fn(), resolve: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -62,7 +64,7 @@ describe("HarnessModeRunner", () => {
 		const resolve = vi.fn()
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve },
-			controller: { transition: vi.fn(), resume: vi.fn() },
+			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn() },
 			modeRunner: { run: vi.fn() },
 		})
 
@@ -85,6 +87,7 @@ describe("HarnessModeRunner", () => {
 					status: "READY_FOR_IMPLEMENTATION",
 				}),
 				resume: vi.fn(),
+				resolve: vi.fn(),
 			},
 			modeRunner: { run: vi.fn().mockResolvedValue({ type: "invalid", reason: "No ready task" }) },
 		})
@@ -165,7 +168,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(blocked) },
-			controller: { transition: vi.fn(), resume },
+			controller: { transition: vi.fn(), resume, resolve: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -183,11 +186,116 @@ describe("HarnessModeRunner", () => {
 			controller: {
 				transition: vi.fn(),
 				resume: vi.fn().mockReturnValue({ type: "invalid", reason: "Unblock Condition unconfirmed" }),
+				resolve: vi.fn(),
 			},
 			modeRunner: { run },
 		})
 
 		expect(await runner.resume({ getTaskContext: vi.fn().mockResolvedValue(context) }, false)).toBeNull()
 		expect(run).not.toHaveBeenCalled()
+	})
+})
+
+function artifacts(taskCount: number): ImplementationArtifacts {
+	return {
+		directory: path.join(context.taskRoot, "implementation"),
+		missingDirectory: taskCount === 0,
+		tasks: Array.from({ length: taskCount }, (_, index) => ({
+			id: `T0${index + 1}`,
+			fileName: `T0${index + 1}-unit.md`,
+			artifact: path.join(context.taskRoot, "implementation", `T0${index + 1}-unit.md`),
+			status: "TODO" as const,
+			statusProblem: null,
+			dependsOn: [],
+			parallelWith: [],
+			produces: null,
+			consumes: null,
+			unclosedCodeFence: false,
+			contentHash: "hash",
+		})),
+		duplicateIds: [],
+		unexpectedFiles: [],
+	}
+}
+
+function validationReport(valid: boolean): ArtifactValidationReport {
+	const issues = valid
+		? []
+		: [
+				{
+					severity: "warning" as const,
+					code: "missing-implementation-plan" as const,
+					taskId: null,
+					message: "Missing implementation-plan.md",
+				},
+			]
+	return { issues, errors: [], warnings: issues, artifacts: artifacts(0), valid }
+}
+
+describe("HarnessModeRunner.continue", () => {
+	it("advances ANALYSIS with a ready plan to Code without a stage outcome", async () => {
+		const analysisState: TaskState = { ...state, status: "ANALYSIS" }
+		const snapshot = artifacts(2)
+		const report = validationReport(true)
+		const read = vi.fn().mockResolvedValue(snapshot)
+		const validate = vi.fn().mockResolvedValue(report)
+		const run = vi.fn().mockResolvedValue({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(analysisState) },
+			controller: new LifecycleController(),
+			modeRunner: { run },
+			parser: { read },
+			validator: { validate },
+		})
+
+		const result = await runner.continue({ getTaskContext: vi.fn().mockResolvedValue(context) })
+
+		expect(read).toHaveBeenCalledWith(context)
+		expect(validate).toHaveBeenCalledWith(context, { status: "ANALYSIS" }, snapshot)
+		expect(run).toHaveBeenCalledWith(context, analysisState, {
+			type: "schedule_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+	})
+
+	it("returns null when the analysis artifacts are not ready", async () => {
+		const run = vi.fn()
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue({ ...state, status: "ANALYSIS" }) },
+			controller: new LifecycleController(),
+			modeRunner: { run },
+			parser: { read: vi.fn().mockResolvedValue(artifacts(0)) },
+			validator: { validate: vi.fn().mockResolvedValue(validationReport(false)) },
+		})
+
+		expect(await runner.continue({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
+		expect(run).not.toHaveBeenCalled()
+	})
+
+	it("returns null for a terminal status", async () => {
+		const run = vi.fn()
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue({ ...state, status: "DONE" }) },
+			controller: new LifecycleController(),
+			modeRunner: { run },
+			parser: { read: vi.fn().mockResolvedValue(artifacts(2)) },
+			validator: { validate: vi.fn().mockResolvedValue(validationReport(true)) },
+		})
+
+		expect(await runner.continue({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
+		expect(run).not.toHaveBeenCalled()
+	})
+
+	it("returns null when the mode runner cannot apply the decision", async () => {
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue({ ...state, status: "IMPLEMENTATION" }) },
+			controller: new LifecycleController(),
+			modeRunner: { run: vi.fn().mockResolvedValue({ type: "invalid", reason: "No ready task" }) },
+			parser: { read: vi.fn().mockResolvedValue(artifacts(2)) },
+			validator: { validate: vi.fn().mockResolvedValue(validationReport(true)) },
+		})
+
+		expect(await runner.continue({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
 	})
 })

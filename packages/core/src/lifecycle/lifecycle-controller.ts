@@ -4,6 +4,7 @@ import {
 	LifecycleError,
 	type FailureTracking,
 	type LifecycleMode,
+	type LifecycleResolveInput,
 	type LifecycleResult,
 	type StageOutcome,
 	type StageResult,
@@ -168,6 +169,95 @@ export class LifecycleController {
 		}
 
 		return { type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" }
+	}
+
+	/**
+	 * Decide whether the lifecycle may advance from the current canonical state
+	 * alone, without a stage outcome.
+	 *
+	 * This is the "the state already allows the next step — take it" half of the
+	 * model. `transition` reacts to a stage that just finished; `resolve` reacts to
+	 * a state that is already routable (for example `ANALYSIS` with a complete
+	 * plan, or `IMPLEMENTATION` after a unit completed), so the chain no longer
+	 * depends on a delegated child stage or on the model re-analysing the
+	 * artifacts.
+	 *
+	 * Pure and side-effect free, like `transition` and `resume`; `ModeRunner`
+	 * applies the result. The returned status is validated against the canonical
+	 * status machine here, so nothing outside this table is ever persisted.
+	 */
+	resolve(input: LifecycleResolveInput): LifecycleResult {
+		const { state, artifacts, report } = input
+		const decision = this.decideFromState(state, artifacts, report)
+
+		// `schedule_implementation` defers the write to TaskScheduler, which owns its
+		// own preconditions and re-derives the canonical status from the DAG.
+		if (decision.type === "invalid" || decision.type === "schedule_implementation") {
+			return decision
+		}
+
+		// Re-writing the current status is a no-op, not a transition: `ModeRunner`
+		// skips the write, which keeps idempotent markers such as `READY_FOR_REFACTOR`
+		// legal without inventing self-loop edges in the canonical table.
+		if (decision.status !== state.status && !isTaskStatusTransition(state.status, decision.status)) {
+			return invalid(
+				`Status transition ${state.status} -> ${decision.status} is not a canonical task status transition`,
+			)
+		}
+
+		return decision
+	}
+
+	private decideFromState(
+		state: TaskState,
+		artifacts: LifecycleResolveInput["artifacts"],
+		report: LifecycleResolveInput["report"],
+	): LifecycleResult {
+		switch (state.status) {
+			case "ANALYSIS": {
+				// Missing plan/directory are warnings at `ANALYSIS`, so `report.valid`
+				// alone is not enough: the analysis is only "ready" when the plan and
+				// the implementation directory exist and at least one unit was parsed.
+				const blocking = report.issues.some(
+					(issue) =>
+						issue.code === "missing-implementation-plan" ||
+						issue.code === "missing-implementation-directory",
+				)
+
+				return report.valid && !blocking && artifacts.tasks.length > 0
+					? { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
+					: invalid("analysis artifacts are not ready; the architect stage must run")
+			}
+
+			case "READY_FOR_IMPLEMENTATION":
+			case "IMPLEMENTATION":
+				// The concrete unit (or the transition to Refactor when every unit is
+				// done) is decided by `ModeRunner`/`TaskScheduler`, not here.
+				return { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
+
+			case "READY_FOR_REFACTOR":
+				return { type: "start_mode", status: "READY_FOR_REFACTOR", mode: "refactor" }
+
+			case "READY_FOR_REVIEW":
+				return { type: "start_mode", status: "READY_FOR_REVIEW", mode: "reviewer" }
+
+			case "REVIEW_PASSED":
+				return { type: "start_mode", status: "REVIEW_PASSED", mode: "qa" }
+
+			case "REFACTOR":
+			case "REVIEW":
+			case "QA_READY":
+				return invalid("a fix pass is in flight; the harness does not advance")
+
+			case "DONE":
+				return invalid("task is done")
+
+			case "BLOCKED":
+				return invalid("task is blocked; resume is a harness-owned action")
+
+			default:
+				return assertNever(state.status)
+		}
 	}
 
 	private decide(state: TaskState, outcome: StageOutcome): LifecycleResult {

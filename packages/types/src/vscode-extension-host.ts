@@ -501,6 +501,7 @@ export interface WebviewMessage {
 		| "openMention"
 		| "cancelTask"
 		| "resumeBlockedTask"
+		| "continueTaskLifecycle"
 		| "cancelAutoApproval"
 		| "updateVSCodeSetting"
 		| "getVSCodeSetting"

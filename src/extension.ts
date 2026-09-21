@@ -25,12 +25,19 @@ import {
 	initializeHarnessLogging,
 	type HarnessLoggingHandle,
 } from "./core/harness/harness-logging"
+import {
+	registerHarnessLogsMcpServer,
+	unregisterHarnessLogsMcpServer,
+} from "./core/harness/log-viewer/mcp-registration"
+import { HARNESS_LOGS_MCP_SERVER_NAME } from "./core/harness/log-viewer/mcp-server"
 import { closeLogViewerServer, getOrCreateLogViewerServer } from "./core/harness/log-viewer/server"
+import { ensureSettingsDirectoryExists } from "./utils/globalContext"
 
 import "./utils/path" // Necessary to have access to String.prototype.toPosix.
 import { createOutputChannelLogger, createDualLogger } from "./utils/outputChannelLogger"
 import { initializeNetworkProxy } from "./utils/networkProxy"
 
+import { GlobalFileNames } from "./shared/globalFileNames"
 import { Package } from "./shared/package"
 import { formatLanguage } from "./shared/language"
 import { ContextProxy } from "./core/config/ContextProxy"
@@ -100,6 +107,156 @@ async function openHarnessLogViewer(): Promise<void> {
 		outputChannel.appendLine(
 			`[harness] Failed to start log viewer: ${error instanceof Error ? error.message : String(error)}`,
 		)
+	}
+}
+
+/** Bundled stdio entrypoint, produced by the second `esbuild.mjs` entrypoint. */
+const HARNESS_LOGS_MCP_BUNDLE = path.join("dist", "mcp", "harness-logs-mcp.js")
+
+type HarnessLogsMcpPaths = {
+	readonly settingsPath: string
+	readonly scriptPath: string
+	readonly logsDirectory: string
+}
+
+/** Absolute path to the `mcp_settings.json` the registration reads and writes. */
+async function resolveMcpSettingsPath(): Promise<string> {
+	const settingsDirectory = await ensureSettingsDirectoryExists(extensionContext)
+
+	return path.join(settingsDirectory, GlobalFileNames.mcpSettings)
+}
+
+/**
+ * Inputs for the `harness-logs` MCP registration. The logs directory comes from
+ * the active JSONL session, so it is only known once harness logging is
+ * initialized; an earlier call reports and returns `undefined` instead of
+ * registering a wrong path.
+ */
+async function resolveHarnessLogsMcpPaths(): Promise<HarnessLogsMcpPaths | undefined> {
+	if (!harnessLogging) {
+		outputChannel.appendLine("[harness] MCP registration skipped: harness logging is not initialized")
+		return undefined
+	}
+
+	return {
+		settingsPath: await resolveMcpSettingsPath(),
+		scriptPath: path.join(extensionContext.extensionPath, HARNESS_LOGS_MCP_BUNDLE),
+		logsDirectory: path.dirname(harnessLogging.jsonlPath),
+	}
+}
+
+/**
+ * Applies a settings change to the running MCP hub. The hub is owned by
+ * `McpServerManager` and reached through the visible provider; when it is not up
+ * yet (no webview has created one), the change is picked up from
+ * `mcp_settings.json` during hub initialization instead.
+ */
+async function reloadMcpServerConnections(): Promise<void> {
+	const hub = ClineProvider.getVisibleInstance()?.getMcpHub()
+
+	if (!hub) {
+		outputChannel.appendLine("[harness] MCP hub is not ready; harness-logs will load from mcp_settings.json")
+		return
+	}
+
+	await hub.refreshAllConnections()
+}
+
+/**
+ * Adds the `harness-logs` MCP server to `mcp_settings.json` and reloads the MCP
+ * hub when the entry changed, so the server connects without a window reload.
+ *
+ * Returns `true` when the settings file was rewritten, `false` when the entry
+ * was already current, and `undefined` when harness logging is not initialized
+ * yet. Write failures propagate: activation treats them as non-fatal, while the
+ * palette command reports them to the user.
+ */
+async function registerHarnessLogsMcp(): Promise<boolean | undefined> {
+	const mcpPaths = await resolveHarnessLogsMcpPaths()
+
+	if (!mcpPaths) {
+		return undefined
+	}
+
+	const changed = await registerHarnessLogsMcpServer(mcpPaths)
+
+	outputChannel.appendLine(
+		`[harness] ${HARNESS_LOGS_MCP_SERVER_NAME} MCP server ${changed ? "registered" : "already registered"}: ${mcpPaths.settingsPath}`,
+	)
+
+	if (changed) {
+		await reloadMcpServerConnections()
+	}
+
+	return changed
+}
+
+/**
+ * Removes the `harness-logs` entry (and nothing else) and reloads the MCP hub
+ * when the settings file changed. Returns `true` when the entry was removed.
+ */
+async function unregisterHarnessLogsMcp(): Promise<boolean> {
+	const settingsPath = await resolveMcpSettingsPath()
+	const removed = await unregisterHarnessLogsMcpServer({ settingsPath })
+
+	outputChannel.appendLine(
+		`[harness] ${HARNESS_LOGS_MCP_SERVER_NAME} MCP server ${removed ? "unregistered" : "was not registered"}: ${settingsPath}`,
+	)
+
+	if (removed) {
+		await reloadMcpServerConnections()
+	}
+
+	return removed
+}
+
+/**
+ * Reports a failed palette action: the full error goes to the output channel,
+ * while the user gets a short pointer to it.
+ */
+function reportMcpCommandFailure(action: "register" | "unregister", error: unknown): void {
+	const detail = error instanceof Error ? error.message : String(error)
+
+	outputChannel.appendLine(`[harness] Failed to ${action} the ${HARNESS_LOGS_MCP_SERVER_NAME} MCP server: ${detail}`)
+	void vscode.window.showErrorMessage(
+		`Failed to ${action} the "${HARNESS_LOGS_MCP_SERVER_NAME}" MCP server. See the Zoo Code output channel for details.`,
+	)
+}
+
+/** Palette command: register the MCP server and report the outcome. */
+async function registerHarnessLogsMcpFromCommand(): Promise<void> {
+	try {
+		const registered = await registerHarnessLogsMcp()
+
+		if (registered === undefined) {
+			void vscode.window.showWarningMessage(
+				`Cannot register the "${HARNESS_LOGS_MCP_SERVER_NAME}" MCP server: harness logging is not initialized.`,
+			)
+			return
+		}
+
+		void vscode.window.showInformationMessage(
+			registered
+				? `Registered the "${HARNESS_LOGS_MCP_SERVER_NAME}" MCP server.`
+				: `The "${HARNESS_LOGS_MCP_SERVER_NAME}" MCP server is already registered.`,
+		)
+	} catch (error) {
+		reportMcpCommandFailure("register", error)
+	}
+}
+
+/** Palette command: remove the `harness-logs` entry and report the outcome. */
+async function unregisterHarnessLogsMcpFromCommand(): Promise<void> {
+	try {
+		const removed = await unregisterHarnessLogsMcp()
+
+		void vscode.window.showInformationMessage(
+			removed
+				? `Unregistered the "${HARNESS_LOGS_MCP_SERVER_NAME}" MCP server.`
+				: `The "${HARNESS_LOGS_MCP_SERVER_NAME}" MCP server was not registered.`,
+		)
+	} catch (error) {
+		reportMcpCommandFailure("unregister", error)
 	}
 }
 
@@ -177,11 +334,35 @@ export async function activate(context: vscode.ExtensionContext) {
 		)
 	}
 
+	// Expose the harness logs to the model as a stdio MCP server. Registration
+	// is add-if-absent, so an entry the user removed or disabled is not restored
+	// behind their back. A failure here must not block activation.
+	try {
+		await registerHarnessLogsMcp()
+	} catch (error) {
+		outputChannel.appendLine(
+			`[harness] Failed to register the ${HARNESS_LOGS_MCP_SERVER_NAME} MCP server: ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
+
 	// Local harness log viewer: the server starts lazily on the first command
 	// run and is stopped in `deactivate()`.
 	context.subscriptions.push(
 		vscode.commands.registerCommand("zoo-code.openHarnessLogViewer", () => {
 			void openHarnessLogViewer()
+		}),
+	)
+
+	// Manual control over the harness logs MCP registration, mirroring the
+	// add-if-absent behavior of activation (`unregister` removes only our entry).
+	context.subscriptions.push(
+		vscode.commands.registerCommand("zoo-code.registerHarnessLogsMcp", () => {
+			void registerHarnessLogsMcpFromCommand()
+		}),
+	)
+	context.subscriptions.push(
+		vscode.commands.registerCommand("zoo-code.unregisterHarnessLogsMcp", () => {
+			void unregisterHarnessLogsMcpFromCommand()
 		}),
 	)
 

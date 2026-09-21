@@ -87,14 +87,17 @@ function makeProvider() {
 		getTaskContext: vi.fn().mockResolvedValue(context),
 	}
 
+	// `Object.create` keeps the real prototype methods on the receiver, so the
+	// provider composes its own harness adapter unmodified while every collaborator
+	// is a stub.
 	return {
 		task,
-		provider: {
+		provider: Object.assign(Object.create(ClineProvider.prototype), {
 			getCurrentTask: vi.fn<() => typeof task | undefined>(() => task),
 			log: vi.fn(),
 			getState: vi.fn().mockResolvedValue({ customModes: [] }),
 			delegateParentAndOpenChild: vi.fn().mockResolvedValue(task),
-		},
+		}),
 	}
 }
 

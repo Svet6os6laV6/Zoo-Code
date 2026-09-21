@@ -9,6 +9,7 @@ export {
 	parseStageOutcome,
 	type FailureTracking,
 	type LifecycleMode,
+	type LifecycleResolveInput,
 	type LifecycleResult,
 	type ModeRunResult,
 	type StageOutcome,

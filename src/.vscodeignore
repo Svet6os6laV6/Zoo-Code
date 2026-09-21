@@ -10,7 +10,8 @@
 !package.json
 !package.nls.*
 
-# Include the built extension
+# Include the built extension (including the bundled harness logs MCP
+# entrypoint at `dist/mcp/harness-logs-mcp.js`)
 !dist
 
 # Include the static harness log viewer page (served unbundled by the log viewer server)

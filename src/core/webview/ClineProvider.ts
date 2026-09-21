@@ -69,6 +69,7 @@ import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTa
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
 import {
+	LIFECYCLE_MODES,
 	LifecycleError,
 	TaskStateResolver,
 	harnessLogger,
@@ -187,6 +188,54 @@ function scheduleTask(
 	void scheduler
 		.schedule(task, run)
 		.catch((error) => console.error(`[${source}] taskScheduler.schedule failed:`, error))
+}
+
+/**
+ * Whether a runtime mode takes part in the harness lifecycle.
+ *
+ * Only these modes have a canonical stage they may complete, so only they may be
+ * routed programmatically. Any other mode (a plain chat, `debug`, `ask`, custom
+ * modes) keeps the ordinary completion and resume behaviour untouched.
+ */
+function isLifecycleMode(mode: string): boolean {
+	return LIFECYCLE_MODES.some((lifecycleMode) => lifecycleMode === mode)
+}
+
+/**
+ * Start the task loop, unless the harness already advanced the lifecycle.
+ *
+ * Used right after a task is created or restored from history:
+ * `continueTaskLifecycle` decides from the canonical state whether the next stage
+ * may start without a stage outcome — for example `ANALYSIS` with a complete plan
+ * after the Architect stage — so such a task is delegated straight to that stage
+ * instead of spending a model turn re-analysing artifacts the harness can already
+ * read. When the lifecycle does not advance, the task starts through the ordinary
+ * scheduler path.
+ *
+ * Routing is best effort and must never stop a task from starting, so a failure
+ * also degrades to the scheduler path.
+ *
+ * Exported for the focused lifecycle-wiring spec; the class is its only caller.
+ */
+export async function startTaskUnlessLifecycleAdvanced(
+	provider: Pick<ClineProvider, "continueTaskLifecycle">,
+	scheduler: TaskScheduler,
+	task: Task,
+	source: string,
+): Promise<void> {
+	try {
+		if (await provider.continueTaskLifecycle(task)) {
+			return
+		}
+	} catch (error) {
+		console.warn(
+			`[${source}] Lifecycle routing failed for ${task.taskId}: ${
+				error instanceof Error ? error.message : String(error)
+			}. Starting the task through the ordinary path.`,
+		)
+	}
+
+	scheduleTask(scheduler, task, source)
 }
 
 /**
@@ -1442,7 +1491,7 @@ export class ClineProvider
 			)
 
 			if (options?.startTask !== false) {
-				scheduleTask(this.taskScheduler, task, "createTaskWithHistoryItem")
+				await startTaskUnlessLifecycleAdvanced(this, this.taskScheduler, task, "createTaskWithHistoryItem")
 			}
 		} else {
 			await this.addClineToStack(task)
@@ -1452,7 +1501,7 @@ export class ClineProvider
 			)
 
 			if (options?.startTask !== false) {
-				scheduleTask(this.taskScheduler, task, "createTaskWithHistoryItem")
+				await startTaskUnlessLifecycleAdvanced(this, this.taskScheduler, task, "createTaskWithHistoryItem")
 			}
 		}
 
@@ -3590,7 +3639,7 @@ export class ClineProvider
 
 		await this.addClineToStack(task)
 		if (options.startTask !== false) {
-			scheduleTask(this.taskScheduler, task, "createTask")
+			await startTaskUnlessLifecycleAdvanced(this, this.taskScheduler, task, "createTask")
 		}
 
 		this.log(
@@ -4156,6 +4205,128 @@ export class ClineProvider
 	}
 
 	/**
+	 * Build the harness adapter that starts lifecycle stages for `parentTaskId`.
+	 *
+	 * One place tells the lifecycle how a stage is opened: the target mode must
+	 * exist in the user's configuration, and the stage is delegated through the
+	 * ordinary `delegateParentAndOpenChild` transition so a harness-started stage
+	 * inherits the same locking, persistence and rollback path as a
+	 * model-initiated `new_task`.
+	 */
+	private harnessModeRunner(parentTaskId: string): HarnessModeRunner {
+		return new HarnessModeRunner(async (mode, message) => {
+			const { customModes } = await this.getState()
+			if (!getModeBySlug(mode, customModes)) {
+				throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
+			}
+
+			await this.delegateParentAndOpenChild({
+				parentTaskId,
+				message,
+				initialTodos: [],
+				mode,
+			})
+		})
+	}
+
+	/**
+	 * Advance the lifecycle of `task` programmatically (harness-owned).
+	 *
+	 * The continuous-chain entry point. It is called from three places: a lifecycle
+	 * stage that just reported its `Stage Result` through `attempt_completion`
+	 * (`resultText` carries the reply), the "continue lifecycle" command/message,
+	 * and a top-level lifecycle task that is starting (the canonical state alone
+	 * decides then).
+	 *
+	 * Returns `true` only when the harness actually started the next stage. Every
+	 * other outcome — a non-lifecycle mode, a task that is itself a delegated
+	 * stage, a task that already has a stage in flight, a state the resolver cannot
+	 * advance, or a routing failure — returns `false`, so the caller keeps its
+	 * existing path (completion ask, resume path, ordinary task start) instead of
+	 * writing state.
+	 */
+	public async continueTaskLifecycle(task: Task, resultText?: string): Promise<boolean> {
+		// Only the stage that owns the chain may advance it: a delegated child was
+		// started *by* the chain and must run its own stage to completion.
+		if (task.parentTaskId) {
+			return false
+		}
+
+		let mode: string
+		try {
+			mode = await task.getTaskMode()
+		} catch (error) {
+			this.log(
+				`[continueTaskLifecycle] Could not resolve the task mode for ${task.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+			return false
+		}
+
+		if (!isLifecycleMode(mode)) {
+			return false
+		}
+
+		try {
+			// Idempotency guard: a task whose history still points at an awaited or
+			// completed child has a stage in flight. Starting a second one would open
+			// a parallel chain over the same README, so the harness declines and the
+			// caller falls back to its existing path.
+			if (this.hasStageInFlight(task.taskId)) {
+				return false
+			}
+
+			const runner = this.harnessModeRunner(task.taskId)
+			const result =
+				resultText === undefined ? await runner.continue(task) : await runner.run(task, mode, resultText)
+
+			return result !== null
+		} catch (error) {
+			this.log(
+				`[continueTaskLifecycle] Lifecycle routing failed for ${task.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}. Keeping the existing path.`,
+			)
+			return false
+		}
+	}
+
+	/**
+	 * Harness-owned "continue lifecycle" action for the current task.
+	 *
+	 * Recovery path for a chain that stopped without a stage outcome to react to
+	 * (for example after a restart): the resolver decides from the canonical state
+	 * alone whether the next stage may start.
+	 */
+	public async continueTaskLifecycleFromCommand(): Promise<void> {
+		const task = this.getCurrentTask()
+		if (!task) {
+			await vscode.window.showInformationMessage("No active task to advance.")
+			return
+		}
+
+		if (await this.continueTaskLifecycle(task)) {
+			return
+		}
+
+		await vscode.window.showInformationMessage(
+			`Task ${task.taskId} cannot be advanced programmatically; the lifecycle is unchanged.`,
+		)
+	}
+
+	/** Whether a delegated stage is already running for `taskId`. */
+	private hasStageInFlight(taskId: string): boolean {
+		const history = this.taskHistoryStore.get(taskId)
+
+		return (
+			history?.status === "delegated" ||
+			history?.awaitingChildId !== undefined ||
+			history?.delegatedToId !== undefined
+		)
+	}
+
+	/**
 	 * Resume the current task when it stopped at `Status: BLOCKED`.
 	 *
 	 * `BLOCKED` is not routable from a stage outcome, so this harness-owned action
@@ -4201,19 +4372,7 @@ export class ClineProvider
 		}
 
 		try {
-			const result = await new HarnessModeRunner(async (mode, message) => {
-				const { customModes } = await this.getState()
-				if (!getModeBySlug(mode, customModes)) {
-					throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
-				}
-
-				await this.delegateParentAndOpenChild({
-					parentTaskId: task.taskId,
-					message,
-					initialTodos: [],
-					mode,
-				})
-			}).resume(task, true)
+			const result = await this.harnessModeRunner(task.taskId).resume(task, true)
 
 			if (!result) {
 				await vscode.window.showWarningMessage(

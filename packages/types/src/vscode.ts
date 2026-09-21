@@ -48,6 +48,7 @@ export const commandIds = [
 	"toggleAutoApprove",
 
 	"resumeBlockedTask",
+	"continueTaskLifecycle",
 
 	"showRipgrepDiagnostic",
 ] as const

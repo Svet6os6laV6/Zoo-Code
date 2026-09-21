@@ -138,13 +138,29 @@ async function main() {
 		outdir: "dist/workers",
 	}
 
-	const [extensionCtx, workerCtx] = await Promise.all([
+	/**
+	 * The harness logs MCP server runs as its own stdio process registered in
+	 * `mcp_settings.json`, so it needs its own CommonJS bundle (the entrypoint
+	 * boots only when `require.main === module`). The VSIX is packaged with
+	 * `--no-dependencies`, so the MCP SDK and its dependencies are bundled here;
+	 * `vscode` is unavailable in that process and stays external.
+	 * @type {import('esbuild').BuildOptions}
+	 */
+	const harnessLogsMcpConfig = {
+		...buildOptions,
+		entryPoints: ["core/harness/log-viewer/mcp-main.ts"],
+		outfile: "dist/mcp/harness-logs-mcp.js",
+		external: ["vscode"],
+	}
+
+	const [extensionCtx, workerCtx, harnessLogsMcpCtx] = await Promise.all([
 		esbuild.context(extensionConfig),
 		esbuild.context(workerConfig),
+		esbuild.context(harnessLogsMcpConfig),
 	])
 
 	if (watch) {
-		await Promise.all([extensionCtx.watch(), workerCtx.watch()])
+		await Promise.all([extensionCtx.watch(), workerCtx.watch(), harnessLogsMcpCtx.watch()])
 		copyLocales(srcDir, distDir)
 		setupLocaleWatcher(srcDir, distDir)
 	} else {
@@ -152,7 +168,8 @@ async function main() {
 		// onEnd hooks copy the same asset directories concurrently.
 		await extensionCtx.rebuild()
 		await workerCtx.rebuild()
-		await Promise.all([extensionCtx.dispose(), workerCtx.dispose()])
+		await harnessLogsMcpCtx.rebuild()
+		await Promise.all([extensionCtx.dispose(), workerCtx.dispose(), harnessLogsMcpCtx.dispose()])
 	}
 }
 
