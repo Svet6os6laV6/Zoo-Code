@@ -13,6 +13,9 @@
 # Include the built extension
 !dist
 
+# Include the static harness log viewer page (served unbundled by the log viewer server)
+!core/harness/log-viewer/public/**
+
 # Include the built webview
 !**/*.map
 !webview-ui/audio

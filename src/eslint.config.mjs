@@ -35,6 +35,22 @@ export default [
 		},
 	},
 	{
+		// Static viewer page: plain browser JS served by the log viewer server.
+		// It never runs in Node, so the browser globals are declared explicitly.
+		files: ["core/harness/log-viewer/public/**/*.js"],
+		languageOptions: {
+			globals: {
+				window: "readonly",
+				document: "readonly",
+				fetch: "readonly",
+				EventSource: "readonly",
+				URL: "readonly",
+				URLSearchParams: "readonly",
+				console: "readonly",
+			},
+		},
+	},
+	{
 		// Ratchet: enforce no-floating-promises directory by directory. Each
 		// directory is added here once its floating promises are resolved.
 		files: [

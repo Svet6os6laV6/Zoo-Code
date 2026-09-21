@@ -131,6 +131,11 @@
 				"category": "Terminal"
 			},
 			{
+				"command": "zoo-code.openHarnessLogViewer",
+				"title": "%command.openHarnessLogViewer.title%",
+				"category": "%configuration.title%"
+			},
+			{
 				"command": "zoo-code.terminalFixCommand",
 				"title": "%command.terminal.fixCommand.title%",
 				"category": "Terminal"

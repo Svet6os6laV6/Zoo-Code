@@ -20,6 +20,7 @@
 	"command.setCustomStoragePath.title": "Set Custom Storage Path",
 	"command.importSettings.title": "Import Settings",
 	"command.terminal.addToContext.title": "Add Terminal Content to Context",
+	"command.openHarnessLogViewer.title": "Open Harness Log Viewer",
 	"command.terminal.fixCommand.title": "Fix This Command",
 	"command.terminal.explainCommand.title": "Explain This Command",
 	"command.acceptInput.title": "Accept Input/Suggestion",

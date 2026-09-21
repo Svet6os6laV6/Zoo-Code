@@ -2,7 +2,7 @@ import * as fs from "fs/promises"
 import * as os from "os"
 import * as path from "path"
 
-import { getRootHarnessLogger, resetRootHarnessLogger } from "@roo-code/core"
+import { BroadcastSink, getRootHarnessLogger, resetRootHarnessLogger, type HarnessLogRecord } from "@roo-code/core"
 
 import { HARNESS_LOG_DIRECTORY, createHarnessSessionId, initializeHarnessLogging } from "../harness-logging"
 
@@ -78,6 +78,29 @@ describe("initializeHarnessLogging", () => {
 		expect(output.lines[0]).toContain('"input":{"branch":"feature/SITESUP-1116-heartbeat"}')
 		expect(output.lines[0]).toContain('"result":{"taskId":"SITESUP-1116"}')
 		expect(output.lines[0]).toContain('"attributes":{"reasonCode":"resolved"}')
+	})
+
+	it("exposes the broadcast sink and delivers live records to its subscribers", async () => {
+		const output = channel()
+		const handle = await initializeHarnessLogging({
+			globalStoragePath: "/storage",
+			channel: output,
+			sessionId: "session-1",
+		})
+
+		expect(handle.broadcast).toBeInstanceOf(BroadcastSink)
+
+		const received: HarnessLogRecord[] = []
+		const unsubscribe = handle.broadcast.subscribe((record) => received.push(record))
+
+		handle.logger.event("harness.prompt.assemble", { attributes: { promptLength: 42 } })
+		await handle.flush()
+
+		expect(received).toHaveLength(1)
+		expect(received[0]).toMatchObject({ kind: "event", name: "harness.prompt.assemble" })
+		expect(handle.broadcast.recent()).toHaveLength(1)
+
+		unsubscribe()
 	})
 
 	it("appends one JSON line per record to the session file", async () => {

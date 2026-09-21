@@ -1,9 +1,11 @@
 /**
  * Harness logging wiring.
  *
- * Builds the process-wide harness logger from two sinks:
+ * Builds the process-wide harness logger from three sinks:
  * - a dedicated "Zoo Code Harness" output channel for humans;
- * - a per-session JSONL file in extension storage for structured analysis.
+ * - a per-session JSONL file in extension storage for structured analysis;
+ * - an in-memory `BroadcastSink` fanning records out to live consumers
+ *   (the log viewer SSE stream).
  *
  * The logger is installed as the root logger, so every harness module picks it
  * up without constructor plumbing.
@@ -12,6 +14,7 @@
 import * as path from "path"
 
 import {
+	BroadcastSink,
 	HarnessLogger,
 	JsonlSink,
 	OutputChannelSink,
@@ -33,6 +36,8 @@ export type HarnessLoggingHandle = {
 	readonly logger: HarnessLoggerPort
 	readonly sessionId: string
 	readonly jsonlPath: string
+	/** In-memory fan-out sink for live consumers (log viewer SSE). */
+	readonly broadcast: BroadcastSink
 	flush(): Promise<void>
 }
 
@@ -68,6 +73,8 @@ export async function initializeHarnessLogging(options: {
 		}
 	}
 
+	const broadcast = new BroadcastSink()
+
 	const logger = new HarnessLogger({
 		context: { sessionId },
 		sinks: [
@@ -76,6 +83,9 @@ export async function initializeHarnessLogging(options: {
 			// mutation is reviewable directly in the channel, not only in the JSONL file.
 			new OutputChannelSink({ channel: options.channel, includePayload: true }),
 			new JsonlSink({ filePath: jsonlPath, onError: (error) => reportSinkError(error, "jsonl") }),
+			// In-memory fan-out for live consumers; a misbehaving subscriber is
+			// isolated inside the sink and never reaches the harness.
+			broadcast,
 		],
 		onSinkError: (error, sink) => reportSinkError(error, sink.name),
 	})
@@ -86,6 +96,7 @@ export async function initializeHarnessLogging(options: {
 		logger,
 		sessionId,
 		jsonlPath,
+		broadcast,
 		flush: () => logger.flush(),
 	}
 }
