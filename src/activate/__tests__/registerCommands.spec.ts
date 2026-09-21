@@ -133,7 +133,7 @@ describe("getVisibleProviderOrLog", () => {
 describe("registerCommands handlers", () => {
 	let mockOutputChannel: vscode.OutputChannel
 	let mockContext: vscode.ExtensionContext
-	let mockVisibleProvider: { postMessageToWebview: Mock }
+	let mockVisibleProvider: { postMessageToWebview: Mock; resumeBlockedTask: Mock }
 	let mockProvider: { postMessageToWebview: Mock }
 	let handlers: Record<string, (...args: unknown[]) => unknown>
 
@@ -158,6 +158,7 @@ describe("registerCommands handlers", () => {
 
 		mockVisibleProvider = {
 			postMessageToWebview: vi.fn().mockResolvedValue(undefined),
+			resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
 		}
 
 		mockProvider = {
@@ -373,6 +374,29 @@ describe("registerCommands handlers", () => {
 
 		// Should not throw even with no visible provider
 		await handlers["zoo-code.plusButtonClicked"]()
+	})
+
+	it("resumeBlockedTask delegates to the visible provider", async () => {
+		await handlers["zoo-code.resumeBlockedTask"]()
+
+		expect(mockVisibleProvider.resumeBlockedTask).toHaveBeenCalledTimes(1)
+	})
+
+	it("resumeBlockedTask logs to outputChannel when the provider throws", async () => {
+		const boom = new Error("resume failed")
+		mockVisibleProvider.resumeBlockedTask.mockRejectedValue(boom)
+
+		await handlers["zoo-code.resumeBlockedTask"]()
+
+		expect(mockOutputChannel.appendLine).toHaveBeenCalledWith(`[resumeBlockedTask] failed: ${boom}`)
+	})
+
+	it("resumeBlockedTask is a no-op when no visible provider", async () => {
+		;(ClineProvider.getVisibleInstance as Mock).mockReturnValue(undefined)
+
+		await handlers["zoo-code.resumeBlockedTask"]()
+
+		expect(mockVisibleProvider.resumeBlockedTask).not.toHaveBeenCalled()
 	})
 })
 

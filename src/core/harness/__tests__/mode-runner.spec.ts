@@ -43,7 +43,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(state) },
-			controller: { transition },
+			controller: { transition, resume: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -62,7 +62,7 @@ describe("HarnessModeRunner", () => {
 		const resolve = vi.fn()
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve },
-			controller: { transition: vi.fn() },
+			controller: { transition: vi.fn(), resume: vi.fn() },
 			modeRunner: { run: vi.fn() },
 		})
 
@@ -84,6 +84,7 @@ describe("HarnessModeRunner", () => {
 					type: "schedule_implementation",
 					status: "READY_FOR_IMPLEMENTATION",
 				}),
+				resume: vi.fn(),
 			},
 			modeRunner: { run: vi.fn().mockResolvedValue({ type: "invalid", reason: "No ready task" }) },
 		})
@@ -155,5 +156,38 @@ describe("HarnessModeRunner", () => {
 		expect(result).toEqual({ type: "started", mode: "reviewer", status: "READY_FOR_REVIEW" })
 		expect(starts.map((start) => start.mode)).toEqual(["reviewer"])
 		expect(files.get(readmePath)).toContain("Status: READY_FOR_REVIEW")
+	})
+
+	it("resumes a BLOCKED task through the harness-owned action", async () => {
+		const expectedResult: ModeRunResult = { type: "started", status: "IMPLEMENTATION", mode: "code" }
+		const blocked = { ...state, status: "BLOCKED" as const }
+		const resume = vi.fn().mockReturnValue({ type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" })
+		const run = vi.fn().mockResolvedValue(expectedResult)
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(blocked) },
+			controller: { transition: vi.fn(), resume },
+			modeRunner: { run },
+		})
+
+		const result = await runner.resume({ getTaskContext: vi.fn().mockResolvedValue(context) }, true)
+
+		expect(resume).toHaveBeenCalledWith(blocked, true)
+		expect(result).toEqual(expectedResult)
+	})
+
+	it("leaves an unconfirmed resume on the caller's existing path", async () => {
+		const blocked = { ...state, status: "BLOCKED" as const }
+		const run = vi.fn()
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(blocked) },
+			controller: {
+				transition: vi.fn(),
+				resume: vi.fn().mockReturnValue({ type: "invalid", reason: "Unblock Condition unconfirmed" }),
+			},
+			modeRunner: { run },
+		})
+
+		expect(await runner.resume({ getTaskContext: vi.fn().mockResolvedValue(context) }, false)).toBeNull()
+		expect(run).not.toHaveBeenCalled()
 	})
 })

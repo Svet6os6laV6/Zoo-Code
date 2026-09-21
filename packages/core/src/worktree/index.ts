@@ -83,6 +83,9 @@ export {
 	type TaskSchedulerFileSystem,
 } from "./task-scheduler.js"
 
+// Implementation unit status writer (parking an assigned unit back to TODO)
+export { parkImplementationTask, type ParkImplementationTaskResult } from "./txx-status-writer.js"
+
 // Task workspace (git worktree) management
 export {
 	WorkspaceManager,

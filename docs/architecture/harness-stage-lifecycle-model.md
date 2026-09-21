@@ -77,6 +77,7 @@ lose:
 | -------------------------------- | --------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `ANALYSIS`                       | architect | `COMPLETED`                           | `schedule_implementation` → `READY_FOR_IMPLEMENTATION`                                                                        |
 | `IMPLEMENTATION`                 | code      | `COMPLETED`                           | `schedule_implementation` → scheduler assigns the next ready unit, or `READY_FOR_REFACTOR` + refactor when every unit is done |
+| `IMPLEMENTATION`                 | code      | `RESCHEDULE_REQUIRED`                 | park the unit (`IN_PROGRESS` → `TODO`), clear the assignment, `TaskScheduler.assignNext` recomputes the DAG                   |
 | `READY_FOR_REFACTOR`, `REFACTOR` | refactor  | `COMPLETED`                           | `READY_FOR_REVIEW` + reviewer                                                                                                 |
 | `READY_FOR_REFACTOR`, `REFACTOR` | refactor  | `FUNCTIONAL_DEFECT`                   | `REFACTOR` + code (fix pass)                                                                                                  |
 | `READY_FOR_REVIEW`, `REVIEW`     | reviewer  | `PASSED`                              | `REVIEW_PASSED` + qa                                                                                                          |
@@ -85,12 +86,50 @@ lose:
 | `REVIEW_PASSED`, `QA_READY`      | qa        | `PENDING`                             | stop at `QA_READY` (waiting for the user)                                                                                     |
 | `REVIEW_PASSED`, `QA_READY`      | qa        | `PASSED`                              | stop at `DONE`                                                                                                                |
 | `REVIEW_PASSED`, `QA_READY`      | qa        | `FAILED`                              | `QA_READY` + code (fix pass)                                                                                                  |
-| any owned status                 | any       | `BLOCKED`                             | stop at `BLOCKED`                                                                                                             |
+| any owned status                 | any       | `BLOCKED`                             | stop at `BLOCKED` (external cause only; a schedulable cause must use `RESCHEDULE_REQUIRED`)                                   |
 
 A fix pass never enters the implementation DAG: the status stays on the requesting stage's marker,
 so `TaskScheduler.assignNext` refuses to assign a unit (it only assigns for implementation stages)
 and the Code child works from the requesting stage's report instead of silently picking up unrelated
 work.
+
+## Two kinds of cause: reschedule vs block
+
+A stage that cannot proceed must classify _why_, because the two causes have opposite effects on the
+lifecycle:
+
+- **Internal, schedulable cause** — the assigned unit is no longer runnable because a dependency on
+  another implementation unit was discovered. The harness can remove this cause itself, so the stage
+  reports `RESCHEDULE_REQUIRED`. The controller routes it to `reschedule_implementation`: the runner
+  parks the unit (`IN_PROGRESS` → `TODO`, progress notes preserved in the artifact), clears the
+  assignment (`READY_FOR_IMPLEMENTATION` + `Current Task: NONE`), and `TaskScheduler.assignNext`
+  recomputes the DAG. The lifecycle keeps running; the parked unit becomes ready again once its
+  dependency is `DONE`.
+- **External, non-removable cause** — a user decision is needed, a credential is missing, an external
+  service is unavailable, or the requirement is unclear. The harness cannot remove this cause, so the
+  stage reports `BLOCKED`. The controller stops at `BLOCKED` and waits for a human.
+
+Reporting `BLOCKED` for a schedulable cause is the deadlock this model exists to prevent: no stage
+outcome leaves `BLOCKED` (`TASK_STATUS_TRANSITIONS.BLOCKED` has only the harness-owned resume edge)
+and `TaskScheduler` only assigns units for implementation stages, so a dependency that is itself a
+`TODO` unit can never complete while the task is blocked. The `code` stage directive states the
+distinction where the stage is started.
+
+## Resuming from BLOCKED
+
+`BLOCKED` is not routable from a stage outcome: no stage result leaves it. It is left only by the
+harness-owned resume action. `LifecycleController.resume(state, unblockConditionMet)` is pure, like
+`transition`: the caller has already confirmed the `Unblock Condition` (a user signal or a verified
+external event), which is why the confirmation is an explicit argument rather than something the
+controller can observe. When it holds, the controller returns `resume_implementation` and `ModeRunner`:
+
+1. writes `READY_FOR_IMPLEMENTATION` and clears `Current Task` (already `NONE` while blocked);
+2. clears the blocker's failure tracking (`Failure Key: NONE`, `Failure Attempts: 0`);
+3. lets `TaskScheduler` recompute the DAG and assign the next ready unit, or move to Refactor when
+   every unit is `DONE`.
+
+The `BLOCKED` → `READY_FOR_IMPLEMENTATION` edge is the only edge out of `BLOCKED`; it is declared in
+`TASK_STATUS_TRANSITIONS`, so a resume cannot write a status the canonical machine does not allow.
 
 ## The report protocol
 
@@ -161,14 +200,18 @@ Everything that can go wrong degrades to the legacy behaviour instead of failing
 
 ## Where the invariants are enforced
 
-| Invariant                                                 | Enforced by                                                                                                                              |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| No status is written outside `TASK_STATUS_TRANSITIONS`    | `LifecycleController.transition`                                                                                                         |
-| A mode only completes a status its stage owns             | `MODE_STATUSES` precondition check                                                                                                       |
-| Every status a mode claims can actually be routed         | controller spec, `claims only stage/status pairs that can actually be routed`                                                            |
-| Every decision the cross-product can produce is canonical | controller spec, `only ever writes canonical task status transitions`                                                                    |
-| The instruction and the parser agree on the marker        | `packages/core/src/lifecycle/__tests__/mode-runner.spec.ts`, `asks the stage for the outcome marker the parser reads back`               |
-| Only one writer mutates the README block                  | `CanonicalReadmeWriter` is the sole read-modify-write path for `ModeRunner`; `TaskScheduler` uses the same field writer and atomic write |
+| Invariant                                                 | Enforced by                                                                                                                                |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| No status is written outside `TASK_STATUS_TRANSITIONS`    | `LifecycleController.transition`                                                                                                           |
+| A mode only completes a status its stage owns             | `MODE_STATUSES` precondition check                                                                                                         |
+| Every status a mode claims can actually be routed         | controller spec, `claims only stage/status pairs that can actually be routed`                                                              |
+| Every decision the cross-product can produce is canonical | controller spec, `only ever writes canonical task status transitions`                                                                      |
+| The instruction and the parser agree on the marker        | `packages/core/src/lifecycle/__tests__/mode-runner.spec.ts`, `asks the stage for the outcome marker the parser reads back`                 |
+| Only one writer mutates the README block                  | `CanonicalReadmeWriter` is the sole read-modify-write path for `ModeRunner`; `TaskScheduler` uses the same field writer and atomic write   |
+| A schedulable cause never stops the lifecycle             | `LifecycleController.decide` routes `code` + `IMPLEMENTATION` + `RESCHEDULE_REQUIRED` to `reschedule_implementation`; only `BLOCKED` stops |
+| A parked unit returns to the DAG                          | `parkImplementationTask` rewrites `IN_PROGRESS` → `TODO`; `readyTasks` re-includes it once its dependency is `DONE`                        |
+| A reschedule cannot loop on the same unit                 | `ModeRunner` refuses a reschedule that left the parked unit ready                                                                          |
+| `BLOCKED` resumes only through the harness action         | `LifecycleController.resume` requires the Unblock Condition and returns the canonical `BLOCKED` → `READY_FOR_IMPLEMENTATION` edge          |
 
 ## Known limitation
 
@@ -182,7 +225,9 @@ it belongs to a deliberate wording decision rather than to this model. If you do
 ## Extending the model
 
 - **New edge between stages** — add it to `TASK_STATUS_TRANSITIONS` and update the controller spec
-  table. The cross-product guard will fail until the decision is written.
+  table. The cross-product guard will fail until the decision is written. The parking edge
+  (`IMPLEMENTATION` → `READY_FOR_IMPLEMENTATION`) is a lifecycle edge, not a remediation marker: it
+  returns an unready unit to the queue instead of starting a fix pass.
 - **New stage outcome** — add the result to `STAGE_RESULTS`, handle it in `LifecycleController.decide`
   (the exhaustive `switch` makes an unhandled result a type error), then extend the spec tables.
 - **New canonical README field** — add it to `CANONICAL_README_FIELDS` in `task-readme.ts` so both

@@ -14,13 +14,13 @@ type LifecycleTask = {
 
 type HarnessModeRunnerDependencies = {
 	readonly stateResolver?: Pick<TaskStateResolver, "resolve">
-	readonly controller?: Pick<LifecycleController, "transition">
+	readonly controller?: Pick<LifecycleController, "transition" | "resume">
 	readonly modeRunner?: Pick<ModeRunner, "run">
 }
 
 export class HarnessModeRunner {
 	private readonly stateResolver: Pick<TaskStateResolver, "resolve">
-	private readonly controller: Pick<LifecycleController, "transition">
+	private readonly controller: Pick<LifecycleController, "transition" | "resume">
 	private readonly modeRunner: Pick<ModeRunner, "run">
 
 	constructor(
@@ -41,6 +41,26 @@ export class HarnessModeRunner {
 		const context = await task.getTaskContext()
 		const state = await this.stateResolver.resolve(context)
 		const decision = this.controller.transition(state, outcome)
+		if (decision.type === "invalid") {
+			return null
+		}
+
+		const result = await this.modeRunner.run(context, state, decision)
+		return result.type === "invalid" ? null : result
+	}
+
+	/**
+	 * Resume a task stopped at `BLOCKED` after the Unblock Condition is confirmed.
+	 *
+	 * Harness-owned like `run`: the caller (a user action or a verified external
+	 * event) asserts `unblockConditionMet`, the controller decides, and the runner
+	 * applies the decision. Returns `null` when the resume is not routable, so the
+	 * caller falls back to its existing resume path instead of writing state.
+	 */
+	async resume(task: LifecycleTask, unblockConditionMet: boolean): Promise<ModeRunResult | null> {
+		const context = await task.getTaskContext()
+		const state = await this.stateResolver.resolve(context)
+		const decision = this.controller.resume(state, unblockConditionMet)
 		if (decision.type === "invalid") {
 			return null
 		}

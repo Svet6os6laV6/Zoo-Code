@@ -45,6 +45,8 @@ describe("TaskScheduler integration", () => {
 			await expect(fs.readFile(readmePath, "utf8")).resolves.toBe(`Protocol Version: 2
 Task: SITESUP-1116
 Status: IMPLEMENTATION
+Failure Key: NONE
+Failure Attempts: 0
 Current Task: implementation/T02-worker.md
 Next Step: Implement T02 (implementation/T02-worker.md).
 `)

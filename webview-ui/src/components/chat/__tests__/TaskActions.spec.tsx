@@ -31,6 +31,7 @@ vi.mock("react-i18next", () => ({
 		t: (key: string) => {
 			const translations: Record<string, string> = {
 				"chat:task.export": "Export task history",
+				"chat:task.resumeBlockedTask": "Resume blocked task",
 				"chat:task.delete": "Delete Task (Shift + Click to skip confirmation)",
 				"chat:task.openApiHistory": "Open API History",
 				"chat:task.openUiHistory": "Open UI History",
@@ -96,6 +97,22 @@ describe("TaskActions", () => {
 
 		expect(mockPostMessage).toHaveBeenCalledWith({
 			type: "exportCurrentTask",
+		})
+	})
+
+	it("renders the resume blocked task button", () => {
+		render(<TaskActions item={mockItem} buttonsDisabled={false} />)
+
+		expect(screen.getByLabelText("Resume blocked task")).toBeInTheDocument()
+	})
+
+	it("sends resumeBlockedTask message when the resume button is clicked", () => {
+		render(<TaskActions item={mockItem} buttonsDisabled={false} />)
+
+		fireEvent.click(screen.getByLabelText("Resume blocked task"))
+
+		expect(mockPostMessage).toHaveBeenCalledWith({
+			type: "resumeBlockedTask",
 		})
 	})
 

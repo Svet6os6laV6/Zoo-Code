@@ -94,6 +94,8 @@ describe("TaskScheduler.assignNext", () => {
 		expect(fileSystem.files.get(readmePath)).toBe(`Protocol Version: 2
 Task: SITESUP-1116
 Status: IMPLEMENTATION
+Failure Key: NONE
+Failure Attempts: 0
 Current Task: implementation/T02-worker.md
 Next Step: Implement T02 (implementation/T02-worker.md).
 `)
@@ -189,6 +191,8 @@ Task: SITESUP-1116
 Status: IMPLEMENTATION
 Current Task: implementation/T02-worker.md
 Next Step: Implement T02 (implementation/T02-worker.md).
+Failure Key: NONE
+Failure Attempts: 0
 `)
 	})
 

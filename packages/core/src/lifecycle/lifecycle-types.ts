@@ -18,6 +18,19 @@ export const STAGE_RESULTS = [
 	"PRODUCTION_FIX_REQUIRED",
 	"PENDING",
 	"FAILED",
+	/**
+	 * The stage is fine, but the unit it was assigned is no longer runnable: an
+	 * internal, schedulable cause (a dependency on another implementation unit was
+	 * discovered, so the DAG must be recomputed). The harness removes this cause
+	 * itself, so the lifecycle keeps running instead of stopping.
+	 */
+	"RESCHEDULE_REQUIRED",
+	/**
+	 * The stage cannot proceed for a reason the harness cannot remove on its own:
+	 * a user decision is needed, a credential is missing, an external service is
+	 * unavailable, or the requirement is unclear. This is the only outcome that
+	 * stops the lifecycle for a human.
+	 */
 	"BLOCKED",
 	"NOT_APPLICABLE",
 ] as const
@@ -76,6 +89,21 @@ export type LifecycleResult =
 			readonly failure?: FailureTracking
 	  }
 	| { readonly type: "schedule_implementation"; readonly status: TaskStatus }
+	/**
+	 * The assigned unit asked to be re-queued because it is no longer ready: the
+	 * runner parks the unit (`IN_PROGRESS` → `TODO`), clears the assignment, and
+	 * lets `TaskScheduler` recompute the DAG. Distinct from
+	 * `schedule_implementation`, which continues the DAG from a unit that has
+	 * already finished.
+	 */
+	| { readonly type: "reschedule_implementation"; readonly status: TaskStatus }
+	/**
+	 * A task stopped at `BLOCKED` resumes after the harness confirmed the Unblock
+	 * Condition. No stage reported this — the harness owns the decision — so it is a
+	 * separate variant from the stage-outcome results. The task returns to the
+	 * implementation queue and `TaskScheduler` recomputes the DAG.
+	 */
+	| { readonly type: "resume_implementation"; readonly status: TaskStatus }
 	| {
 			readonly type: "stop"
 			readonly status: TaskStatus

@@ -31,6 +31,7 @@ import {
 import type { TaskContext } from "../worktree/task-resolver.js"
 import type { TaskState, TaskStatus } from "../worktree/task-state.js"
 import { TaskScheduler } from "../worktree/task-scheduler.js"
+import { parkImplementationTask } from "../worktree/txx-status-writer.js"
 
 import {
 	LifecycleError,
@@ -95,33 +96,79 @@ export class ModeRunner {
 			case "schedule_implementation": {
 				const assignment = await this.scheduler.assignNext(context, { ...state, status: decision.status })
 				if (assignment) {
-					await this.startMode(
-						"code",
-						buildStageInstruction({
-							mode: "code",
-							taskId: context.taskId,
-							assignedArtifact: assignment.relativeArtifact,
-						}),
-					)
-					return { type: "started", mode: "code", status: "IMPLEMENTATION" }
+					return this.startCode(context, assignment.relativeArtifact)
 				}
+
+				return this.startRefactorOrInvalid(context)
+			}
+
+			case "reschedule_implementation":
+			case "resume_implementation": {
+				// Two ways the task returns to the implementation queue with the DAG
+				// recomputed: a unit that discovered an internal dependency (park it so
+				// it becomes ready again once the dependency completes), and a task
+				// resumed from `BLOCKED` after the harness confirmed the Unblock
+				// Condition. Nothing is assigned while blocked, so the park and the
+				// reschedule loop guard are no-ops on resume.
+				if (state.currentTaskArtifact) {
+					await parkImplementationTask(this.fileSystem, state.currentTaskArtifact)
+				}
+
+				// Clear the assignment. `READY_FOR_IMPLEMENTATION` + `Current Task: NONE`
+				// is a canonical, resumable state, so even a failure below leaves the
+				// task recoverable instead of stuck at BLOCKED.
+				await this.writeState(context, decision.status)
 
 				const plan = await this.scheduler.plan(context)
-				if (plan.artifacts.tasks.length > 0 && plan.done.length === plan.artifacts.tasks.length) {
-					await this.writeState(context, "READY_FOR_REFACTOR")
-					await this.startMode(
-						"refactor",
-						buildStageInstruction({ mode: "refactor", taskId: context.taskId, assignedArtifact: null }),
-					)
-					return { type: "started", mode: "refactor", status: "READY_FOR_REFACTOR" }
+
+				// Guard against a spurious reschedule: if the parked unit is still
+				// ready, no real dependency was added and reassigning it would loop.
+				if (state.currentTask && plan.ready.some((task) => task.id === state.currentTask)) {
+					return {
+						type: "invalid",
+						reason: `Reschedule left ${state.currentTask} ready; no dependency was added`,
+					}
 				}
 
-				return { type: "invalid", reason: "TaskScheduler found no ready implementation unit" }
+				const assignment = await this.scheduler.assignNext(
+					context,
+					{ ...state, status: decision.status, currentTask: null, currentTaskArtifact: null },
+					plan.artifacts,
+				)
+				if (assignment) {
+					return this.startCode(context, assignment.relativeArtifact)
+				}
+
+				return this.startRefactorOrInvalid(context)
 			}
 
 			default:
 				return this.assertNever(decision)
 		}
+	}
+
+	/** Start Code on an assigned unit and report the started stage. */
+	private async startCode(context: TaskContext, assignedArtifact: string): Promise<ModeRunResult> {
+		await this.startMode("code", buildStageInstruction({ mode: "code", taskId: context.taskId, assignedArtifact }))
+		return { type: "started", mode: "code", status: "IMPLEMENTATION" }
+	}
+
+	/**
+	 * The DAG has no ready unit left: start Refactor when every unit is done,
+	 * otherwise report `invalid` so the caller falls back to the legacy resume.
+	 */
+	private async startRefactorOrInvalid(context: TaskContext): Promise<ModeRunResult> {
+		const plan = await this.scheduler.plan(context)
+		if (plan.artifacts.tasks.length > 0 && plan.done.length === plan.artifacts.tasks.length) {
+			await this.writeState(context, "READY_FOR_REFACTOR")
+			await this.startMode(
+				"refactor",
+				buildStageInstruction({ mode: "refactor", taskId: context.taskId, assignedArtifact: null }),
+			)
+			return { type: "started", mode: "refactor", status: "READY_FOR_REFACTOR" }
+		}
+
+		return { type: "invalid", reason: "TaskScheduler found no ready implementation unit" }
 	}
 
 	/**
@@ -156,7 +203,16 @@ export class ModeRunner {
 				fields["Failure Attempts"] = attempts
 			}
 		} else {
-			Object.assign(fields, clearedFailureFields(readme))
+			// Clearing also completes a protocol v2 block that never had the failure
+			// fields, but only when a field actually changes: an already-canonical
+			// README stays byte-identical, so an idempotent marker is still a no-op.
+			const cleared = clearedFailureFields()
+			if (current.failureKey !== cleared["Failure Key"]) {
+				fields["Failure Key"] = cleared["Failure Key"]
+			}
+			if (current.failureAttempts !== cleared["Failure Attempts"]) {
+				fields["Failure Attempts"] = cleared["Failure Attempts"]
+			}
 		}
 
 		if (Object.keys(fields).length === 0) {

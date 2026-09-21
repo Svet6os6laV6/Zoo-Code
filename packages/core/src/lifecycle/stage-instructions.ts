@@ -37,10 +37,15 @@ export const STAGE_ARTIFACTS = {
  * One line describing what the stage is responsible for. The detailed procedure
  * stays in the mode's own rules; this only orients a stage that was started by the
  * harness rather than by the user.
+ *
+ * The `code` directive also carries the outcome classification, because it is the
+ * only stage that can discover an internal dependency while working an assigned
+ * unit. Reporting `BLOCKED` for a schedulable cause would stop the lifecycle and
+ * deadlock the DAG, so the distinction is stated where the stage is started.
  */
 export const STAGE_DIRECTIVES = {
 	architect: "Produce or update the implementation plan artifacts.",
-	code: "Implement the assigned implementation unit, or the reported fix.",
+	code: "Implement the assigned implementation unit, or the reported fix. Report RESCHEDULE_REQUIRED when the unit cannot proceed until another unit in implementation/ is done: record the dependency and the progress notes in the unit artifact first. Report BLOCKED only for obstacles the harness cannot remove itself (a user decision, missing credentials, an unavailable external service).",
 	refactor: "Restructure the completed implementation without changing behaviour.",
 	reviewer: "Review the implementation against the requirements and record findings.",
 	qa: "Verify the reviewed work against the acceptance criteria and record evidence.",

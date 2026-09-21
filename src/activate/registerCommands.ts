@@ -219,6 +219,19 @@ const getCommandsMap = ({
 			outputChannel.appendLine(`[toggleAutoApprove] postMessageToWebview failed: ${error}`)
 		}
 	},
+	resumeBlockedTask: async () => {
+		const visibleProvider = getVisibleProviderOrLog(outputChannel)
+
+		if (!visibleProvider) {
+			return
+		}
+
+		try {
+			await visibleProvider.resumeBlockedTask()
+		} catch (error) {
+			outputChannel.appendLine(`[resumeBlockedTask] failed: ${error}`)
+		}
+	},
 })
 
 export const openClineInNewTab = async ({ context, outputChannel }: Omit<RegisterCommandOptions, "provider">) => {

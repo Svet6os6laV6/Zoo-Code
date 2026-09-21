@@ -8,7 +8,15 @@ import { useCopyToClipboard } from "@/utils/clipboard"
 import { useExtensionState } from "@/context/ExtensionStateContext"
 
 import { DeleteTaskDialog } from "../history/DeleteTaskDialog"
-import { CopyIcon, CheckIcon, DownloadIcon, Trash2Icon, FileJsonIcon, MessageSquareCodeIcon } from "lucide-react"
+import {
+	CopyIcon,
+	CheckIcon,
+	DownloadIcon,
+	Trash2Icon,
+	FileJsonIcon,
+	MessageSquareCodeIcon,
+	PlayIcon,
+} from "lucide-react"
 import { LucideIconButton } from "./LucideIconButton"
 
 interface TaskActionsProps {
@@ -24,6 +32,12 @@ export const TaskActions = ({ item, buttonsDisabled }: TaskActionsProps) => {
 
 	return (
 		<div className="flex flex-row items-center -ml-0.5 mt-1 gap-1">
+			<LucideIconButton
+				icon={PlayIcon}
+				title={t("chat:task.resumeBlockedTask")}
+				onClick={() => vscode.postMessage({ type: "resumeBlockedTask" })}
+			/>
+
 			<LucideIconButton
 				icon={DownloadIcon}
 				title={t("chat:task.export")}

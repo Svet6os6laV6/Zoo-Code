@@ -55,7 +55,18 @@ type TaskStateFileSystem = {
 export const TASK_STATUS_TRANSITIONS = {
 	ANALYSIS: ["READY_FOR_IMPLEMENTATION", "IMPLEMENTATION", "BLOCKED"],
 	READY_FOR_IMPLEMENTATION: ["IMPLEMENTATION", "BLOCKED"],
-	IMPLEMENTATION: ["IMPLEMENTATION", "ANALYSIS", "READY_FOR_REFACTOR", "READY_FOR_REVIEW", "BLOCKED"],
+	// `READY_FOR_IMPLEMENTATION` is the parking edge: an assigned unit that turned
+	// out not to be ready (a dependency on another unit was discovered) returns to
+	// the queue so the scheduler can recompute the DAG. It is not a remediation
+	// marker — the unit itself goes back to `TODO`, not to a fix pass.
+	IMPLEMENTATION: [
+		"IMPLEMENTATION",
+		"ANALYSIS",
+		"READY_FOR_IMPLEMENTATION",
+		"READY_FOR_REFACTOR",
+		"READY_FOR_REVIEW",
+		"BLOCKED",
+	],
 	READY_FOR_REFACTOR: ["REFACTOR", "READY_FOR_REVIEW", "BLOCKED"],
 	REFACTOR: ["IMPLEMENTATION", "READY_FOR_REFACTOR", "READY_FOR_REVIEW", "BLOCKED"],
 	READY_FOR_REVIEW: ["REVIEW", "REVIEW_PASSED", "BLOCKED"],
@@ -63,7 +74,11 @@ export const TASK_STATUS_TRANSITIONS = {
 	REVIEW_PASSED: ["IMPLEMENTATION", "QA_READY", "DONE", "BLOCKED"],
 	QA_READY: ["IMPLEMENTATION", "REVIEW_PASSED", "DONE", "BLOCKED"],
 	DONE: [],
-	BLOCKED: [],
+	// The resume edge: a task stopped at `BLOCKED` returns to the implementation
+	// queue once the harness confirms the Unblock Condition. `BLOCKED` stays
+	// otherwise terminal — no stage outcome leaves it, only the harness-owned
+	// resume action does.
+	BLOCKED: ["READY_FOR_IMPLEMENTATION"],
 } as const satisfies Record<TaskStatus, readonly TaskStatus[]>
 
 export class TaskStateError extends Error {

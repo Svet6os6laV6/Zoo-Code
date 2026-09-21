@@ -500,6 +500,7 @@ export interface WebviewMessage {
 		| "readFileContent"
 		| "openMention"
 		| "cancelTask"
+		| "resumeBlockedTask"
 		| "cancelAutoApproval"
 		| "updateVSCodeSetting"
 		| "getVSCodeSetting"

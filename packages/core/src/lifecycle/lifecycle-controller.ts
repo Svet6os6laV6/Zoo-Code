@@ -140,6 +140,36 @@ export class LifecycleController {
 		return decision
 	}
 
+	/**
+	 * Resume a task stopped at `BLOCKED`.
+	 *
+	 * `BLOCKED` is not routable from a stage outcome, so the harness owns this
+	 * action. The caller has already confirmed the `Unblock Condition` (a user
+	 * signal or a verified external event), which is why the confirmation is an
+	 * explicit argument the controller cannot observe itself. The task returns to
+	 * the implementation queue; `ModeRunner` clears the blocker's failure tracking
+	 * and `TaskScheduler` recomputes the DAG.
+	 *
+	 * Pure and side-effect free, like `transition`; `ModeRunner` applies the result.
+	 */
+	resume(state: TaskState, unblockConditionMet: boolean): LifecycleResult {
+		if (state.status !== "BLOCKED") {
+			return invalid(`Resume is only valid from BLOCKED, got ${state.status}`)
+		}
+
+		if (!unblockConditionMet) {
+			return invalid("Resume requires the Unblock Condition to be confirmed")
+		}
+
+		if (!isTaskStatusTransition("BLOCKED", "READY_FOR_IMPLEMENTATION")) {
+			return invalid(
+				"Status transition BLOCKED -> READY_FOR_IMPLEMENTATION is not a canonical task status transition",
+			)
+		}
+
+		return { type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" }
+	}
+
 	private decide(state: TaskState, outcome: StageOutcome): LifecycleResult {
 		if (outcome.result === "BLOCKED") {
 			return { type: "stop", status: "BLOCKED", reason: "blocked" }
@@ -152,6 +182,17 @@ export class LifecycleController {
 					: unsupported(outcome.mode, outcome.result)
 
 			case "code":
+				// The assigned unit is no longer runnable because an internal,
+				// schedulable cause was discovered (a dependency on another unit).
+				// The harness removes this cause itself: park the unit and let the
+				// scheduler recompute the DAG. Only an assigned unit can ask for
+				// this; a fix pass (REFACTOR/REVIEW/QA_READY) is not in the DAG.
+				if (outcome.result === "RESCHEDULE_REQUIRED") {
+					return state.status === "IMPLEMENTATION"
+						? { type: "reschedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
+						: unsupported(outcome.mode, outcome.result)
+				}
+
 				if (outcome.result !== "COMPLETED") {
 					return unsupported(outcome.mode, outcome.result)
 				}

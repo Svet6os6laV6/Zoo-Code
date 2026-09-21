@@ -232,8 +232,8 @@ describe("TaskScheduler instrumentation", () => {
 			status: "IMPLEMENTATION",
 			currentTask: "implementation/T02-worker.md",
 			nextStep: "Implement T02 (implementation/T02-worker.md).",
-			failureKey: null,
-			failureAttempts: null,
+			failureKey: "NONE",
+			failureAttempts: "0",
 		})
 	})
 

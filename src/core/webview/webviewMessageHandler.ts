@@ -1651,6 +1651,11 @@ export const webviewMessageHandler = async (
 		case "cancelTask":
 			await provider.cancelTask()
 			break
+		case "resumeBlockedTask":
+			// Harness-owned resume of a task stopped at `Status: BLOCKED`; the
+			// provider shows the Unblock Condition confirmation before acting.
+			await provider.resumeBlockedTask()
+			break
 		case "cancelAutoApproval":
 			// Cancel any pending auto-approval timeout for the current task
 			provider.getCurrentTask()?.cancelAutoApprovalTimeout()

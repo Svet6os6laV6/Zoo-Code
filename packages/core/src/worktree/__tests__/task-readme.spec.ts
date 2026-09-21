@@ -61,19 +61,14 @@ Next Step: Start implementation.
 `)
 	})
 
-	it("clears an active failure block with the canonical sentinels", () => {
-		const active = `${canonicalReadme}Failure Key: auth-token-expiry
-Failure Attempts: 2
-`
-
-		expect(clearedFailureFields(active)).toEqual({
+	it("always emits the canonical sentinels, so the block is cleared or completed", () => {
+		// The function is input-independent on purpose: a lifecycle decision that
+		// advances past a failure must complete the protocol v2 block even when the
+		// README never had a failure field.
+		expect(clearedFailureFields()).toEqual({
 			"Failure Key": NO_FAILURE_KEY,
 			"Failure Attempts": NO_FAILURE_ATTEMPTS,
 		})
-	})
-
-	it("leaves a README without a failure block unchanged when clearing", () => {
-		expect(clearedFailureFields(canonicalReadme)).toEqual({})
 	})
 
 	it("rewrites only the named fields and preserves every other line", () => {

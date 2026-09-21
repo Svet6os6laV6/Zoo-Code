@@ -68,7 +68,13 @@ import {
 import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTaskCosts"
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
-import { LifecycleError, harnessLogger, type HarnessLogContextInput } from "@roo-code/core"
+import {
+	LifecycleError,
+	TaskStateResolver,
+	harnessLogger,
+	type HarnessLogContextInput,
+	type TaskState,
+} from "@roo-code/core"
 
 import { Package } from "../../shared/package"
 import { findLast } from "../../shared/array"
@@ -4147,6 +4153,79 @@ export class ClineProvider
 		}
 
 		return child
+	}
+
+	/**
+	 * Resume the current task when it stopped at `Status: BLOCKED`.
+	 *
+	 * `BLOCKED` is not routable from a stage outcome, so this harness-owned action
+	 * is the only way out of it. The user confirms that the recorded `Unblock
+	 * Condition` is met — that confirmation is the explicit signal the lifecycle
+	 * contract requires — and `HarnessModeRunner.resume` then clears the blocker,
+	 * clears the failure tracking, recomputes the DAG and starts the next stage.
+	 */
+	public async resumeBlockedTask(): Promise<void> {
+		const task = this.getCurrentTask()
+		if (!task) {
+			await vscode.window.showInformationMessage("No active task to resume.")
+			return
+		}
+
+		let state: TaskState
+		try {
+			state = await new TaskStateResolver().resolve(await task.getTaskContext())
+		} catch (error) {
+			this.log(
+				`[resumeBlockedTask] Could not resolve the task state: ${error instanceof Error ? error.message : String(error)}`,
+			)
+			await vscode.window.showErrorMessage("Could not read the task lifecycle state.")
+			return
+		}
+
+		if (state.status !== "BLOCKED") {
+			await vscode.window.showInformationMessage(
+				`Task ${state.taskId} is not blocked (status: ${state.status}); nothing to resume.`,
+			)
+			return
+		}
+
+		const confirmation = await vscode.window.showWarningMessage(
+			`Resume task ${state.taskId}? Confirm that the recorded Unblock Condition is met ` +
+				`(see handoff.md and the stage artifact). The harness will clear BLOCKED, ` +
+				`recompute the implementation DAG and start the next stage.`,
+			{ modal: true },
+			"Resume",
+		)
+		if (confirmation !== "Resume") {
+			return
+		}
+
+		try {
+			const result = await new HarnessModeRunner(async (mode, message) => {
+				const { customModes } = await this.getState()
+				if (!getModeBySlug(mode, customModes)) {
+					throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
+				}
+
+				await this.delegateParentAndOpenChild({
+					parentTaskId: task.taskId,
+					message,
+					initialTodos: [],
+					mode,
+				})
+			}).resume(task, true)
+
+			if (!result) {
+				await vscode.window.showWarningMessage(
+					`Task ${state.taskId} could not be resumed; the harness left it unchanged.`,
+				)
+			}
+		} catch (error) {
+			this.log(`[resumeBlockedTask] Resume failed: ${error instanceof Error ? error.message : String(error)}`)
+			await vscode.window.showErrorMessage(
+				`Failed to resume task ${state.taskId}: ${error instanceof Error ? error.message : String(error)}`,
+			)
+		}
 	}
 
 	/**

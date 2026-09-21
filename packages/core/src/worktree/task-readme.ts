@@ -113,20 +113,15 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
  * so the block stays readable instead of accumulating fields in arbitrary places.
  */
 /**
- * The fields that clear an active failure-tracking block, or an empty object when
- * the README carries no failure fields.
+ * The fields that clear an active failure-tracking block.
  *
  * Clearing is expressed as canonical sentinels (`NONE` / `0`) because the writer
- * only replaces and inserts fields — it never deletes lines. Returning `{}` when
- * the block is already absent keeps fresh READMEs from growing two empty fields.
+ * only replaces and inserts fields — it never deletes lines. The sentinels are
+ * emitted even when the README has no failure fields yet, so the protocol v2
+ * canonical block is always complete: a decision that advances past a failure
+ * writes the fields back instead of leaving the block malformed.
  */
-export function clearedFailureFields(readme: string): CanonicalReadmeFields {
-	const fields = readCanonicalFields(readme)
-
-	if (fields.failureKey === null && fields.failureAttempts === null) {
-		return {}
-	}
-
+export function clearedFailureFields(): CanonicalReadmeFields {
 	return { "Failure Key": NO_FAILURE_KEY, "Failure Attempts": NO_FAILURE_ATTEMPTS }
 }
 

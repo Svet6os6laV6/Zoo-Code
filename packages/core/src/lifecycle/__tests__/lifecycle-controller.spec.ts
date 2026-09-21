@@ -32,6 +32,12 @@ describe("LifecycleController", () => {
 			{ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" },
 		],
 		[
+			"IMPLEMENTATION",
+			"code",
+			"RESCHEDULE_REQUIRED",
+			{ type: "reschedule_implementation", status: "READY_FOR_IMPLEMENTATION" },
+		],
+		[
 			"READY_FOR_REFACTOR",
 			"refactor",
 			"COMPLETED",
@@ -95,6 +101,34 @@ describe("LifecycleController", () => {
 		expect(decision).toEqual({ type: "stop", status: "BLOCKED", reason: "blocked" })
 	})
 
+	it("rejects RESCHEDULE_REQUIRED from a fix pass, which is not in the DAG", () => {
+		// A fix pass runs from the requesting stage's marker, so it has no assigned
+		// unit to re-queue; only an assigned implementation unit can reschedule.
+		const decision = controller.transition(state("REVIEW"), {
+			mode: "code",
+			result: "RESCHEDULE_REQUIRED",
+			failureKey: null,
+		})
+
+		expect(decision).toEqual({
+			type: "invalid",
+			reason: "Stage result RESCHEDULE_REQUIRED is not supported for mode code",
+		})
+	})
+
+	it("rejects RESCHEDULE_REQUIRED from a stage that owns no implementation unit", () => {
+		const decision = controller.transition(state("READY_FOR_REVIEW"), {
+			mode: "reviewer",
+			result: "RESCHEDULE_REQUIRED",
+			failureKey: null,
+		})
+
+		expect(decision).toEqual({
+			type: "invalid",
+			reason: "Stage result RESCHEDULE_REQUIRED is not supported for mode reviewer",
+		})
+	})
+
 	it("rejects an outcome from a mode that does not own the current stage", () => {
 		const decision = controller.transition(state("REVIEW"), { mode: "qa", result: "PASSED", failureKey: null })
 
@@ -125,7 +159,11 @@ describe("LifecycleController", () => {
 			for (const mode of LIFECYCLE_MODES) {
 				for (const result of STAGE_RESULTS) {
 					const decision = controller.transition(state(status), { mode, result, failureKey: null })
-					if (decision.type !== "start_mode" && decision.type !== "stop") {
+					if (
+						decision.type !== "start_mode" &&
+						decision.type !== "stop" &&
+						decision.type !== "reschedule_implementation"
+					) {
 						continue
 					}
 
@@ -217,6 +255,28 @@ describe("LifecycleController", () => {
 			status: "REVIEW",
 			mode: "code",
 			failure: { key: null, attempts: 2 },
+		})
+	})
+
+	it("resumes a task stopped at BLOCKED back into the implementation queue", () => {
+		const decision = controller.resume(state("BLOCKED"), true)
+
+		expect(decision).toEqual({ type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" })
+		// The resume edge is canonical, so the status the runner writes is reachable.
+		expect(isTaskStatusTransition("BLOCKED", "READY_FOR_IMPLEMENTATION")).toBe(true)
+	})
+
+	it("refuses to resume before the Unblock Condition is confirmed", () => {
+		expect(controller.resume(state("BLOCKED"), false)).toEqual({
+			type: "invalid",
+			reason: "Resume requires the Unblock Condition to be confirmed",
+		})
+	})
+
+	it("refuses to resume from any status other than BLOCKED", () => {
+		expect(controller.resume(state("IMPLEMENTATION"), true)).toEqual({
+			type: "invalid",
+			reason: "Resume is only valid from BLOCKED, got IMPLEMENTATION",
 		})
 	})
 })

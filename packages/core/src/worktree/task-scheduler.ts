@@ -249,7 +249,7 @@ export class TaskScheduler {
 			Status: "IMPLEMENTATION",
 			"Current Task": relativeArtifact,
 			"Next Step": `Implement ${taskId} (${relativeArtifact}).`,
-			...clearedFailureFields(readme),
+			...clearedFailureFields(),
 		})
 	}
 }

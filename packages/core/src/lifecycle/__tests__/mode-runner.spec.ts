@@ -130,7 +130,8 @@ describe("ModeRunner", () => {
 
 	it("does not touch the README when the decision re-writes the current status", async () => {
 		const fileSystem = createInMemoryFileSystem({
-			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\n",
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\nFailure Key: NONE\nFailure Attempts: 0\n",
 		})
 		const writeFile = vi.spyOn(fileSystem, "writeFile")
 		const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem)
@@ -143,6 +144,23 @@ describe("ModeRunner", () => {
 
 		expect(result).toEqual({ type: "stopped", status: "QA_READY", reason: "pending" })
 		expect(writeFile).not.toHaveBeenCalled()
+	})
+
+	it("completes a canonical block that is missing the failure fields", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\n",
+		})
+		const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem)
+
+		await runner.run(context, state("QA_READY"), {
+			type: "stop",
+			status: "QA_READY",
+			reason: "pending",
+		})
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Failure Key: NONE")
+		expect(readme).toContain("Failure Attempts: 0")
 	})
 
 	it("asks the stage for the outcome marker the parser reads back", async () => {
@@ -235,5 +253,126 @@ describe("ModeRunner", () => {
 
 		const instruction = messages[0] ?? ""
 		expect(instruction).toContain("implementation/T02-unit.md")
+	})
+
+	it("parks the assigned unit and reassigns the next ready unit on RESCHEDULE_REQUIRED", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: IMPLEMENTATION\nCurrent Task: implementation/T02-unit.md\n",
+			[path.join(implementation, "T02-unit.md")]:
+				"## Status\nStatus: IN_PROGRESS\n\n## Relationships\n\n- Depends on: T03\n",
+			[path.join(implementation, "T03-unit.md")]: "## Status\nStatus: TODO\n",
+		})
+		const starts: string[] = []
+		const messages: string[] = []
+		const runner = new ModeRunner(
+			async (mode, message) => {
+				starts.push(mode)
+				messages.push(message)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("IMPLEMENTATION", "T02"), {
+			type: "reschedule_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+		expect(starts).toEqual(["code"])
+		// The parked unit returns to TODO so the DAG can make it ready again.
+		expect(fileSystem.files.get(path.join(implementation, "T02-unit.md"))).toContain("Status: TODO")
+		// The scheduler recomputed the DAG and assigned the dependency.
+		expect(fileSystem.files.get(readmePath)).toContain("Current Task: implementation/T03-unit.md")
+		expect(messages[0] ?? "").toContain("implementation/T03-unit.md")
+	})
+
+	it("refuses a reschedule that left the unit ready, so it cannot loop", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: IMPLEMENTATION\nCurrent Task: implementation/T02-unit.md\n",
+			[path.join(implementation, "T02-unit.md")]: "## Status\nStatus: IN_PROGRESS\n",
+			[path.join(implementation, "T03-unit.md")]: "## Status\nStatus: TODO\n",
+		})
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("IMPLEMENTATION", "T02"), {
+			type: "reschedule_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		expect(result).toEqual({
+			type: "invalid",
+			reason: "Reschedule left T02 ready; no dependency was added",
+		})
+		expect(starts).toEqual([])
+		// The README is left in a canonical, resumable state.
+		expect(fileSystem.files.get(readmePath)).toContain("Status: READY_FOR_IMPLEMENTATION")
+		expect(fileSystem.files.get(readmePath)).toContain("Current Task: NONE")
+	})
+
+	it("starts Refactor when a reschedule finds every unit done", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: IMPLEMENTATION\nCurrent Task: implementation/T02-unit.md\n",
+			[path.join(implementation, "T02-unit.md")]: "## Status\nStatus: DONE\n",
+			[path.join(implementation, "T03-unit.md")]: "## Status\nStatus: DONE\n",
+		})
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("IMPLEMENTATION", "T02"), {
+			type: "reschedule_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		expect(result).toEqual({ type: "started", mode: "refactor", status: "READY_FOR_REFACTOR" })
+		expect(starts).toEqual(["refactor"])
+	})
+
+	it("resumes a BLOCKED task, clears the blocker and assigns the next ready unit", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]:
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: BLOCKED\nCurrent Task: NONE\nFailure Key: external-blocker\nFailure Attempts: 1\n",
+			[path.join(implementation, "T01-unit.md")]: "## Status\nStatus: DONE\n",
+			[path.join(implementation, "T02-unit.md")]:
+				"## Status\nStatus: TODO\n\n## Relationships\n\n- Depends on: T01\n",
+		})
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("BLOCKED"), {
+			type: "resume_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+		expect(starts).toEqual(["code"])
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Status: IMPLEMENTATION")
+		expect(readme).toContain("Current Task: implementation/T02-unit.md")
+		expect(readme).toContain("Failure Key: NONE")
+		expect(readme).toContain("Failure Attempts: 0")
 	})
 })
