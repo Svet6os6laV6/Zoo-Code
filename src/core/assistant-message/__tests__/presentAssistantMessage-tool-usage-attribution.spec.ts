@@ -63,6 +63,7 @@ interface MockTask {
 	api: { getModel: () => { id: string; info: Record<string, unknown> } }
 	recordToolUsage: ReturnType<typeof vi.fn>
 	recordToolError: ReturnType<typeof vi.fn>
+	getTaskMode: ReturnType<typeof vi.fn>
 	toolRepetitionDetector: { check: ReturnType<typeof vi.fn> }
 	providerRef: {
 		deref: () => {
@@ -101,6 +102,7 @@ describe("presentAssistantMessage - tool usage attribution", () => {
 			},
 			recordToolUsage: vi.fn(),
 			recordToolError: vi.fn(),
+			getTaskMode: vi.fn().mockResolvedValue("code"),
 			toolRepetitionDetector: {
 				check: vi.fn().mockReturnValue({ allowExecution: true }),
 			},

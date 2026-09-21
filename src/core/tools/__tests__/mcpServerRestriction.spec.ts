@@ -1,5 +1,7 @@
 // npx vitest run core/tools/__tests__/mcpServerRestriction.spec.ts
 
+import type { ModeConfig } from "@roo-code/types"
+
 import type { Task } from "../../task/Task"
 import { isMcpServerAllowed, getAllowedMcpServersForTask, ensureMcpServerAllowed } from "../mcpServerRestriction"
 
@@ -16,13 +18,16 @@ import { getModeBySlug } from "../../../shared/modes"
 
 const toolError = (error: string) => `ERR:${error}`
 
-function makeTask(state: any): Task {
+function makeTask(state: any, taskMode?: string): Task {
 	return {
 		providerRef: {
 			deref: () => ({
 				getState: vi.fn().mockResolvedValue(state),
 			}),
 		},
+		// The task's own mode drives the allowlist; defaults to the provider state mode
+		// for tests that do not model a delegated subtask.
+		getTaskMode: vi.fn().mockResolvedValue(taskMode ?? state.mode),
 		consecutiveMistakeCount: 0,
 		didToolFailInCurrentTurn: false,
 		recordToolError: vi.fn(),
@@ -62,6 +67,19 @@ describe("getAllowedMcpServersForTask", () => {
 		} as any)
 		const task = makeTask({ mode: "code", customModes: [] })
 		await expect(getAllowedMcpServersForTask(task)).resolves.toEqual(["srv-a"])
+	})
+
+	it("uses the task's own mode, not the provider's global mode", async () => {
+		// Only the code slug resolves to an allowlist; the parent's orchestrator slug does not.
+		// The double assertion is required because the mocked mode is a minimal stub.
+		vi.mocked(getModeBySlug).mockImplementation((slug) =>
+			slug === "code" ? ({ allowedMcpServers: ["srv-code"] } as unknown as ModeConfig) : undefined,
+		)
+		// Provider state still reflects the orchestrator-mode parent; the task runs in code mode.
+		const task = makeTask({ mode: "orchestrator", customModes: [] }, "code")
+
+		await expect(getAllowedMcpServersForTask(task)).resolves.toEqual(["srv-code"])
+		expect(getModeBySlug).toHaveBeenCalledWith("code", [])
 	})
 
 	it("returns undefined when the mode does not restrict servers", async () => {

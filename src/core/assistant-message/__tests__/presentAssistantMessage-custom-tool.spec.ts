@@ -63,6 +63,7 @@ describe("presentAssistantMessage - Custom Tool Recording", () => {
 			},
 			recordToolUsage: vi.fn(),
 			recordToolError: vi.fn(),
+			getTaskMode: vi.fn().mockResolvedValue("code"),
 			toolRepetitionDetector: {
 				check: vi.fn().mockReturnValue({ allowExecution: true }),
 			},

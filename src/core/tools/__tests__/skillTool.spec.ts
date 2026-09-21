@@ -21,6 +21,7 @@ describe("skillTool", () => {
 		mockTask = {
 			consecutiveMistakeCount: 0,
 			recordToolError: vi.fn(),
+			getTaskMode: vi.fn().mockResolvedValue("code"),
 			didToolFailInCurrentTurn: false,
 			sayAndCreateMissingParamError: vi.fn().mockResolvedValue("Missing parameter error"),
 			ask: vi.fn().mockResolvedValue({}),
@@ -111,10 +112,8 @@ describe("skillTool", () => {
 			},
 		}
 
-		mockTask.providerRef.deref = vi.fn().mockReturnValue({
-			getState: vi.fn().mockResolvedValue({ mode: "orchestrator" }),
-			getSkillsManager: vi.fn().mockReturnValue(mockSkillsManager),
-		})
+		// The task's own mode drives skill resolution, not provider state.
+		mockTask.getTaskMode.mockResolvedValue("orchestrator")
 		mockSkillsManager.getSkillContent.mockResolvedValue(null)
 		mockSkillsManager.getSkillsMetadata.mockReturnValue([
 			{ name: "qa-scope", modeSlugs: ["qa"], source: "project" },
@@ -128,6 +127,37 @@ describe("skillTool", () => {
 					"Switch mode or delegate with new_task before invoking it.",
 			),
 		)
+	})
+
+	it("resolves skills against the task mode even when provider state reports the parent's mode", async () => {
+		const block: ToolUse<"skill"> = {
+			type: "tool_use" as const,
+			name: "skill" as const,
+			params: {},
+			partial: false,
+			nativeArgs: {
+				skill: "qa-scope",
+			},
+		}
+
+		// Provider state still reflects the orchestrator-mode parent...
+		mockTask.providerRef.deref = vi.fn().mockReturnValue({
+			getState: vi.fn().mockResolvedValue({ mode: "orchestrator" }),
+			getSkillsManager: vi.fn().mockReturnValue(mockSkillsManager),
+		})
+		// ...but the delegated subtask runs in code mode.
+		mockTask.getTaskMode.mockResolvedValue("code")
+		mockSkillsManager.getSkillContent.mockResolvedValue({
+			name: "qa-scope",
+			description: "QA scope",
+			source: "project",
+			instructions: "Do QA.",
+		})
+
+		await skillTool.handle(mockTask as Task, block, mockCallbacks)
+
+		// The skill is resolved for the task's own mode, not the parent's.
+		expect(mockSkillsManager.getSkillContent).toHaveBeenCalledWith("qa-scope", "code")
 	})
 
 	it("should successfully load a global skill", async () => {

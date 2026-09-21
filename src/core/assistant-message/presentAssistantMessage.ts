@@ -342,9 +342,15 @@ export async function presentAssistantMessage(cline: Task) {
 				break
 			}
 
-			// Fetch state early so it's available for toolDescription and validation
+			// Fetch state early so it's available for toolDescription and validation.
+			// The mode must come from the task itself, not provider state: under the
+			// per-task ("sticky") mode model a delegated subtask runs in its own mode
+			// while the provider's global mode still reflects the parent task. Validating
+			// against the global mode would reject every tool a subtask legitimately uses
+			// (e.g. a code-mode child of an orchestrator-mode parent).
 			const state = await cline.providerRef.deref()?.getState()
-			const { mode, customModes, experiments: stateExperiments, disabledTools } = state ?? {}
+			const { customModes, experiments: stateExperiments, disabledTools } = state ?? {}
+			const mode = await cline.getTaskMode()
 
 			const toolDescription = (): string => {
 				switch (block.name) {
@@ -617,7 +623,7 @@ export async function presentAssistantMessage(cline: Task) {
 
 					validateToolUse(
 						block.name as ToolName,
-						mode ?? defaultModeSlug,
+						mode,
 						customModes ?? [],
 						toolRequirements,
 						block.params,
@@ -928,7 +934,7 @@ export async function presentAssistantMessage(cline: Task) {
 							}
 
 							const result = await customTool.execute(customToolArgs, {
-								mode: mode ?? defaultModeSlug,
+								mode,
 								task: cline,
 							})
 
