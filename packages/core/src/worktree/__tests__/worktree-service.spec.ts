@@ -2,6 +2,25 @@ import * as path from "path"
 
 import { WorktreeService } from "../worktree-service.js"
 
+const mocks = vi.hoisted(() => ({
+	exec: vi.fn(),
+	execFile: vi.fn(),
+}))
+
+vi.mock("child_process", () => ({
+	exec: mocks.exec,
+	execFile: mocks.execFile,
+}))
+
+type ExecCallback = (error: Error | null, result: { stdout: string; stderr: string }) => void
+
+/** Answers the mocked `exec` like a git command that finished, or failed. */
+function mockExec({ error = null, stdout = "" }: { error?: Error | null; stdout?: string } = {}): void {
+	mocks.exec.mockImplementation((_command: string, _options: unknown, callback: unknown) =>
+		(callback as ExecCallback)(error, { stdout, stderr: "" }),
+	)
+}
+
 describe("WorktreeService", () => {
 	describe("normalizePath", () => {
 		let service: WorktreeService
@@ -141,6 +160,44 @@ bare
 				path: "/home/user/repo.git",
 				isBare: true,
 			})
+		})
+	})
+
+	describe("getCurrentBranch", () => {
+		let service: WorktreeService
+
+		beforeEach(() => {
+			service = new WorktreeService()
+			mocks.exec.mockReset()
+		})
+
+		it("should return the branch name for a regular branch with commits", async () => {
+			mockExec({ stdout: "feature/webhook-mvp\n" })
+
+			await expect(service.getCurrentBranch("/repo")).resolves.toBe("feature/webhook-mvp")
+			expect(mocks.exec).toHaveBeenCalledWith(
+				"git symbolic-ref --short HEAD",
+				expect.objectContaining({ cwd: "/repo" }),
+				expect.any(Function),
+			)
+		})
+
+		it("should return the branch name on an unborn HEAD (branch without commits)", async () => {
+			mockExec({ stdout: "fresh\n" })
+
+			await expect(service.getCurrentBranch("/repo")).resolves.toBe("fresh")
+		})
+
+		it("should return null on a detached HEAD", async () => {
+			mockExec({ error: new Error("fatal: ref HEAD is not a symbolic ref") })
+
+			await expect(service.getCurrentBranch("/repo")).resolves.toBeNull()
+		})
+
+		it("should return null outside a git repository", async () => {
+			mockExec({ error: new Error("fatal: not a git repository") })
+
+			await expect(service.getCurrentBranch("/not-a-repo")).resolves.toBeNull()
 		})
 	})
 })

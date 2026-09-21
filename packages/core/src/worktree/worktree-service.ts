@@ -65,10 +65,14 @@ export class WorktreeService {
 
 	/**
 	 * Get the current branch name.
+	 *
+	 * Uses `git symbolic-ref --short HEAD` so that a branch without any commits
+	 * (unborn HEAD) still resolves to its name. On a detached HEAD or outside a
+	 * git repository the command fails and we return null.
 	 */
 	async getCurrentBranch(cwd: string): Promise<string | null> {
 		try {
-			const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd })
+			const { stdout } = await execAsync("git symbolic-ref --short HEAD", { cwd })
 			const branch = stdout.trim()
 			return branch === "HEAD" ? null : branch
 		} catch {
