@@ -12,11 +12,14 @@
  * - Output structure formatting
  */
 
+import type { Dirent } from "fs"
+
 import path from "path"
 
 import { isBinaryFile } from "isbinaryfile"
 
 import { readFileTool, ReadFileTool } from "../ReadFileTool"
+import type { Task } from "../../task/Task"
 import { formatResponse } from "../../prompts/responses"
 import {
 	validateImageForProcessing,
@@ -40,9 +43,16 @@ vi.mock("path", async () => {
 	}
 })
 
+// `fs/promises.readdir` is overloaded (string[] vs Dirent[]); a hoisted untyped
+// mock keeps `mockResolvedValue` accepting `Dirent[]` without casts.
+const fsMocks = vi.hoisted(() => ({
+	readdir: vi.fn(),
+}))
+
 vi.mock("fs/promises", () => ({
 	readFile: vi.fn(),
 	stat: vi.fn(),
+	readdir: fsMocks.readdir,
 }))
 
 vi.mock("isbinaryfile")
@@ -120,6 +130,7 @@ vi.mock("../../prompts/responses", () => ({
 const fsPromises = await import("fs/promises")
 const mockedFsReadFile = vi.mocked(fsPromises.readFile)
 const mockedFsStat = vi.mocked(fsPromises.stat)
+const mockedFsReaddir = fsMocks.readdir
 
 const mockedIsBinaryFile = vi.mocked(isBinaryFile)
 const mockedExtractTextFromFile = vi.mocked(extractTextFromFile)
@@ -130,6 +141,27 @@ const mockedValidateImageForProcessing = vi.mocked(validateImageForProcessing)
 const mockedProcessImageFile = vi.mocked(processImageFile)
 
 // ─── Test Helpers ─────────────────────────────────────────────────────────────
+
+function dirent(name: string, isDirectory = false): Dirent {
+	return {
+		name,
+		parentPath: "",
+		path: "",
+		isFile: () => !isDirectory,
+		isDirectory: () => isDirectory,
+		isBlockDevice: () => false,
+		isCharacterDevice: () => false,
+		isFIFO: () => false,
+		isSocket: () => false,
+		isSymbolicLink: () => false,
+	}
+}
+
+// The mock implements only the surface ReadFileTool touches; a double assertion
+// is the pragmatic way to satisfy the full Task type without `as any`.
+function asTask(mock: ReturnType<typeof createMockTask>): Task {
+	return mock as unknown as Task
+}
 
 interface MockTaskOptions {
 	supportsImages?: boolean
@@ -712,6 +744,33 @@ describe("ReadFileTool", () => {
 
 			expect(mockTask.say).toHaveBeenCalledWith("error", expect.stringContaining("Error reading file"))
 			expect(mockTask.didToolFailInCurrentTurn).toBe(true)
+		})
+
+		it("should suggest similar files when the requested file is not found", async () => {
+			const mockTask = createMockTask()
+			const callbacks = createMockCallbacks()
+
+			mockedFsReadFile.mockRejectedValue(
+				Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" }),
+			)
+			mockedFsReaddir.mockResolvedValue([dirent("nonexistent-test.ts"), dirent("other.ts")])
+
+			await readFileTool.execute({ path: "nonexistent.ts" }, asTask(mockTask), callbacks)
+
+			expect(callbacks.pushToolResult).toHaveBeenCalledWith(expect.stringContaining("Hint:"))
+			expect(callbacks.pushToolResult).toHaveBeenCalledWith(expect.stringContaining("nonexistent-test.ts"))
+		})
+
+		it("should not add a hint for non-ENOENT read errors", async () => {
+			const mockTask = createMockTask()
+			const callbacks = createMockCallbacks()
+
+			mockedFsReadFile.mockRejectedValue(new Error("Permission denied"))
+
+			await readFileTool.execute({ path: "protected.ts" }, asTask(mockTask), callbacks)
+
+			expect(callbacks.pushToolResult).toHaveBeenCalledWith(expect.not.stringContaining("Hint:"))
+			expect(mockedFsReaddir).not.toHaveBeenCalled()
 		})
 	})
 

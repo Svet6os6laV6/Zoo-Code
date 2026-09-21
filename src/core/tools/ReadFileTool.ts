@@ -33,6 +33,7 @@ import {
 	processImageFile,
 	ImageMemoryTracker,
 } from "./helpers/imageHelpers"
+import { buildFileNotFoundHint } from "./helpers/fileNotFoundHint"
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -225,10 +226,13 @@ export class ReadFileTool extends BaseTool<"read_file"> {
 					})
 				} catch (error) {
 					const errorMsg = error instanceof Error ? error.message : String(error)
+					// When the path does not exist, suggest the closest matching
+					// entries so the model can correct a mistyped/hallucinated name.
+					const hint = await buildFileNotFoundHint(relPath, fullPath, task.cwd, error)
 					updateFileResult(relPath, {
 						status: "error",
-						error: `Error reading file: ${errorMsg}`,
-						nativeContent: `File: ${relPath}\nError: ${errorMsg}`,
+						error: `Error reading file: ${errorMsg}${hint}`,
+						nativeContent: `File: ${relPath}\nError: ${errorMsg}${hint}`,
 					})
 					await task.say("error", `Error reading file ${relPath}: ${errorMsg}`)
 				}
@@ -801,7 +805,10 @@ export class ReadFileTool extends BaseTool<"read_file"> {
 				await task.fileContextTracker.trackFileContext(relPath, "read_tool")
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error)
-				results.push(`File: ${relPath}\nError: ${errorMsg}`)
+				// When the path does not exist, suggest the closest matching
+				// entries so the model can correct a mistyped/hallucinated name.
+				const hint = await buildFileNotFoundHint(relPath, fullPath, task.cwd, error)
+				results.push(`File: ${relPath}\nError: ${errorMsg}${hint}`)
 				await task.say("error", `Error reading file ${relPath}: ${errorMsg}`)
 				// Mirror the native path: a failed read marks the tool turn as failed.
 				task.didToolFailInCurrentTurn = true
