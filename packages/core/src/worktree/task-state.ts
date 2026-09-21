@@ -1,6 +1,7 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { isFileNotFound } from "../fs-errors.js"
 import { harnessLogger } from "../observability/harness-logger.js"
 import type { HarnessLogLevel, HarnessLoggerPort } from "../observability/types.js"
 
@@ -87,10 +88,6 @@ export class TaskStateError extends Error {
 
 function isTaskStatus(value: string): value is TaskStatus {
 	return TASK_STATUSES.some((status) => status === value)
-}
-
-function isFileNotFound(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 }
 
 function readField(content: string, name: string): string | undefined {

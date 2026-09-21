@@ -137,27 +137,43 @@ export class ArtifactValidator {
 		const requiresImplementationArtifacts = STAGES_REQUIRING_IMPLEMENTATION_ARTIFACTS.has(options.status ?? "")
 		const missingSeverity: ArtifactValidationSeverity = requiresImplementationArtifacts ? "error" : "warning"
 
-		const readme = await this.readOptional(path.join(context.taskRoot, "README.md"))
-		if (readme === null) {
-			issues.push(issue("error", "missing-readme", null, `Missing README.md for task ${context.taskId}`))
-		} else if (hasUnclosedCodeFence(readme)) {
-			issues.push(issue("error", "unclosed-code-fence", null, "unclosed markdown code fence in README.md"))
-		}
+		// The three task documents share one check: missing (severity depends on
+		// the stage) and an unclosed code fence is always an error.
+		const documents: readonly {
+			readonly fileName: string
+			readonly code: ArtifactValidationCode
+			readonly severity: ArtifactValidationSeverity
+			readonly message: string
+		}[] = [
+			{
+				fileName: "README.md",
+				code: "missing-readme",
+				severity: "error",
+				message: `Missing README.md for task ${context.taskId}`,
+			},
+			{
+				fileName: "implementation-plan.md",
+				code: "missing-implementation-plan",
+				severity: missingSeverity,
+				message: "Missing implementation-plan.md",
+			},
+			{
+				fileName: "handoff.md",
+				code: "missing-handoff",
+				severity: missingSeverity,
+				message: "Missing handoff.md",
+			},
+		]
 
-		const plan = await this.readOptional(path.join(context.taskRoot, "implementation-plan.md"))
-		if (plan === null) {
-			issues.push(issue(missingSeverity, "missing-implementation-plan", null, "Missing implementation-plan.md"))
-		} else if (hasUnclosedCodeFence(plan)) {
-			issues.push(
-				issue("error", "unclosed-code-fence", null, "unclosed markdown code fence in implementation-plan.md"),
-			)
-		}
-
-		const handoff = await this.readOptional(path.join(context.taskRoot, "handoff.md"))
-		if (handoff === null) {
-			issues.push(issue(missingSeverity, "missing-handoff", null, "Missing handoff.md"))
-		} else if (hasUnclosedCodeFence(handoff)) {
-			issues.push(issue("error", "unclosed-code-fence", null, "unclosed markdown code fence in handoff.md"))
+		for (const document of documents) {
+			const content = await this.readOptional(path.join(context.taskRoot, document.fileName))
+			if (content === null) {
+				issues.push(issue(document.severity, document.code, null, document.message))
+			} else if (hasUnclosedCodeFence(content)) {
+				issues.push(
+					issue("error", "unclosed-code-fence", null, `unclosed markdown code fence in ${document.fileName}`),
+				)
+			}
 		}
 
 		const snapshot = artifacts ?? (await this.parser.read(context))

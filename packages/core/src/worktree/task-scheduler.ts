@@ -172,7 +172,8 @@ export class TaskScheduler {
 			)
 		}
 
-		const next = readyTasks(snapshot.tasks)[0]
+		const ready = readyTasks(snapshot.tasks)
+		const next = ready[0]
 		if (!next) {
 			return skip(
 				"no implementation unit is ready; every pending unit has an unfinished dependency",
@@ -213,7 +214,7 @@ export class TaskScheduler {
 		}
 
 		logger.decision("harness.scheduler.assignNext", {
-			input: { ...input, readyUnits: readyTasks(snapshot.tasks).map((task) => task.id) },
+			input: { ...input, readyUnits: ready.map((task) => task.id) },
 			result: {
 				taskId: next.id,
 				relativeArtifact,

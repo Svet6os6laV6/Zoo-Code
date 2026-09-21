@@ -106,13 +106,6 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
 }
 
 /**
- * Rewrite the named canonical fields, preserving every other line.
- *
- * Returns `null` when the README has no canonical `Status` line. A field that is
- * absent from the README is inserted after the `Status` line in canonical order,
- * so the block stays readable instead of accumulating fields in arbitrary places.
- */
-/**
  * The fields that clear an active failure-tracking block.
  *
  * Clearing is expressed as canonical sentinels (`NONE` / `0`) because the writer
@@ -125,6 +118,13 @@ export function clearedFailureFields(): CanonicalReadmeFields {
 	return { "Failure Key": NO_FAILURE_KEY, "Failure Attempts": NO_FAILURE_ATTEMPTS }
 }
 
+/**
+ * Rewrite the named canonical fields, preserving every other line.
+ *
+ * Returns `null` when the README has no canonical `Status` line. A field that is
+ * absent from the README is inserted after the `Status` line in canonical order,
+ * so the block stays readable instead of accumulating fields in arbitrary places.
+ */
 export function writeCanonicalFields(readme: string, fields: CanonicalReadmeFields): string | null {
 	const lines = readme.split(/\r?\n/)
 	const statusIndex = findFieldIndex(lines, "Status")

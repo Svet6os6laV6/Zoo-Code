@@ -20,6 +20,7 @@ import { createHash } from "crypto"
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { isFileNotFound } from "../fs-errors.js"
 import { harnessLogger } from "../observability/harness-logger.js"
 import type { HarnessLoggerPort } from "../observability/types.js"
 
@@ -73,9 +74,9 @@ type Frontmatter = {
 	readonly lists: ReadonlyMap<string, readonly string[]>
 }
 
-export function isFileNotFound(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
-}
+// Re-exported for the existing public surface (`worktree/index.ts`); the single
+// definition lives in the shared fs-errors module.
+export { isFileNotFound }
 
 /**
  * A truncated artifact has an odd number of code fences, which breaks every

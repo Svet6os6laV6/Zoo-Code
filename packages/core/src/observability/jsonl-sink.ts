@@ -13,6 +13,7 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
+import { isFileNotFound } from "../fs-errors.js"
 import type { HarnessLogRecord, HarnessLogSink } from "./types.js"
 
 /**
@@ -41,10 +42,6 @@ export type JsonlSinkOptions = {
 
 export const DEFAULT_JSONL_MAX_BYTES = 5 * 1024 * 1024
 export const DEFAULT_JSONL_MAX_ARCHIVES = 3
-
-function isFileNotFound(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
-}
 
 export class JsonlSink implements HarnessLogSink {
 	readonly name = "jsonl"

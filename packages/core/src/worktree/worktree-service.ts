@@ -56,15 +56,11 @@ export class WorktreeService {
 	}
 
 	/**
-	 * Get the current worktree path.
+	 * Get the current worktree path. The same query as the repository root,
+	 * so it delegates instead of duplicating the command.
 	 */
 	async getCurrentWorktreePath(cwd: string): Promise<string | null> {
-		try {
-			const { stdout } = await execAsync("git rev-parse --show-toplevel", { cwd })
-			return stdout.trim()
-		} catch {
-			return null
-		}
+		return this.getGitRootPath(cwd)
 	}
 
 	/**

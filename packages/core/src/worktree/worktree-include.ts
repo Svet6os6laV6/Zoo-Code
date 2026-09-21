@@ -278,18 +278,6 @@ export class WorktreeIncludeService {
 	}
 
 	/**
-	 * Get the current size of a directory (for progress tracking).
-	 */
-	private async getCurrentDirectorySize(dirPath: string): Promise<number> {
-		try {
-			await fs.access(dirPath)
-			return await this.getDirectorySizeRecursive(dirPath)
-		} catch {
-			return 0
-		}
-	}
-
-	/**
 	 * Copy directory with progress polling using native cp command.
 	 * Starts native copy and polls target directory size to report progress.
 	 * Returns the updated bytesCopied count.
@@ -344,7 +332,9 @@ export class WorktreeIncludeService {
 
 		const pollProgress = async () => {
 			while (polling) {
-				const currentSize = await this.getCurrentDirectorySize(target)
+				// getDirectorySizeRecursive already reports 0 for a missing or
+				// unreadable directory, which is the correct "nothing copied yet".
+				const currentSize = await this.getDirectorySizeRecursive(target)
 				const totalCopied = bytesCopiedBefore + currentSize
 
 				onProgress?.({
