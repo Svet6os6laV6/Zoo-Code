@@ -1,3 +1,8 @@
+import type {
+	ArtifactValidationIssue,
+	ArtifactValidationReport,
+	ImplementationArtifacts,
+} from "../../worktree/index.js"
 import { TASK_STATUSES, isTaskStatusTransition, type TaskState } from "../../worktree/task-state.js"
 import {
 	LIFECYCLE_MODES,
@@ -278,6 +283,158 @@ describe("LifecycleController", () => {
 			type: "invalid",
 			reason: "Resume is only valid from BLOCKED, got IMPLEMENTATION",
 		})
+	})
+})
+
+function artifacts(taskCount: number): ImplementationArtifacts {
+	return {
+		directory: "/workspace/.roo/tasks/SITESUP-1116/implementation",
+		missingDirectory: taskCount === 0,
+		tasks: Array.from({ length: taskCount }, (_, index) => ({
+			id: `T0${index + 1}`,
+			fileName: `T0${index + 1}-unit.md`,
+			artifact: `/workspace/.roo/tasks/SITESUP-1116/implementation/T0${index + 1}-unit.md`,
+			status: "TODO" as const,
+			statusProblem: null,
+			dependsOn: [],
+			parallelWith: [],
+			produces: null,
+			consumes: null,
+			unclosedCodeFence: false,
+			contentHash: "hash",
+		})),
+		duplicateIds: [],
+		unexpectedFiles: [],
+	}
+}
+
+function validationReport(issues: readonly ArtifactValidationIssue[] = []): ArtifactValidationReport {
+	const errors = issues.filter((item) => item.severity === "error")
+	const warnings = issues.filter((item) => item.severity === "warning")
+	return { issues, errors, warnings, artifacts: artifacts(0), valid: errors.length === 0 }
+}
+
+function issue(
+	severity: ArtifactValidationIssue["severity"],
+	code: ArtifactValidationIssue["code"],
+): ArtifactValidationIssue {
+	return { severity, code, taskId: null, message: code }
+}
+
+describe("LifecycleController.resolve", () => {
+	it("advances ANALYSIS to implementation when the analysis artifacts are ready", () => {
+		const decision = controller.resolve({
+			state: state("ANALYSIS"),
+			artifacts: artifacts(2),
+			report: validationReport(),
+		})
+
+		expect(decision).toEqual({ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" })
+	})
+
+	it.each([
+		["a missing implementation plan", validationReport([issue("warning", "missing-implementation-plan")]), 2],
+		[
+			"a missing implementation directory",
+			validationReport([issue("warning", "missing-implementation-directory")]),
+			2,
+		],
+		["no parsed implementation unit", validationReport(), 0],
+		["a structural error", validationReport([issue("error", "duplicate-task-id")]), 2],
+	] as const)("keeps ANALYSIS on the architect stage for %s", (_label, report, taskCount) => {
+		const decision = controller.resolve({ state: state("ANALYSIS"), artifacts: artifacts(taskCount), report })
+
+		expect(decision).toEqual({
+			type: "invalid",
+			reason: "analysis artifacts are not ready; the architect stage must run",
+		})
+	})
+
+	it.each(["READY_FOR_IMPLEMENTATION", "IMPLEMENTATION"] as const)(
+		"continues the implementation DAG from %s",
+		(status) => {
+			const decision = controller.resolve({
+				state: state(status),
+				artifacts: artifacts(2),
+				report: validationReport(),
+			})
+
+			expect(decision).toEqual({ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" })
+		},
+	)
+
+	it.each([
+		["READY_FOR_REFACTOR", "refactor"],
+		["READY_FOR_REVIEW", "reviewer"],
+		["REVIEW_PASSED", "qa"],
+	] as const)("starts the %s stage as a no-op self-loop", (status, mode) => {
+		const decision = controller.resolve({
+			state: state(status),
+			artifacts: artifacts(2),
+			report: validationReport(),
+		})
+
+		expect(decision).toEqual({ type: "start_mode", status, mode })
+	})
+
+	it.each(["REFACTOR", "REVIEW", "QA_READY"] as const)(
+		"does not advance while a fix pass is in flight at %s",
+		(status) => {
+			const decision = controller.resolve({
+				state: state(status),
+				artifacts: artifacts(2),
+				report: validationReport(),
+			})
+
+			expect(decision).toEqual({
+				type: "invalid",
+				reason: "a fix pass is in flight; the harness does not advance",
+			})
+		},
+	)
+
+	it("does not advance a DONE task", () => {
+		expect(
+			controller.resolve({ state: state("DONE"), artifacts: artifacts(2), report: validationReport() }),
+		).toEqual({
+			type: "invalid",
+			reason: "task is done",
+		})
+	})
+
+	it("leaves a BLOCKED task to the harness-owned resume action", () => {
+		expect(
+			controller.resolve({ state: state("BLOCKED"), artifacts: artifacts(2), report: validationReport() }),
+		).toEqual({
+			type: "invalid",
+			reason: "task is blocked; resume is a harness-owned action",
+		})
+	})
+
+	/**
+	 * The drift guard for `resolve`: whatever status it decides to write must
+	 * already be legal in the canonical README status machine (or be a no-op
+	 * rewrite of the status the task is already in).
+	 */
+	it("only ever writes canonical task status transitions", () => {
+		const violations: string[] = []
+
+		for (const status of TASK_STATUSES) {
+			const decision = controller.resolve({
+				state: state(status),
+				artifacts: artifacts(2),
+				report: validationReport(),
+			})
+			if (decision.type !== "start_mode" && decision.type !== "stop") {
+				continue
+			}
+
+			if (decision.status !== status && !isTaskStatusTransition(status, decision.status)) {
+				violations.push(`${status} -> ${decision.status}`)
+			}
+		}
+
+		expect(violations).toEqual([])
 	})
 })
 

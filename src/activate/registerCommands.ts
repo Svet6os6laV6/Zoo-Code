@@ -232,6 +232,19 @@ const getCommandsMap = ({
 			outputChannel.appendLine(`[resumeBlockedTask] failed: ${error}`)
 		}
 	},
+	continueTaskLifecycle: async () => {
+		const visibleProvider = getVisibleProviderOrLog(outputChannel)
+
+		if (!visibleProvider) {
+			return
+		}
+
+		try {
+			await visibleProvider.continueTaskLifecycleFromCommand()
+		} catch (error) {
+			outputChannel.appendLine(`[continueTaskLifecycle] failed: ${error}`)
+		}
+	},
 })
 
 export const openClineInNewTab = async ({ context, outputChannel }: Omit<RegisterCommandOptions, "provider">) => {

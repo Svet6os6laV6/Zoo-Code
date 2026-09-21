@@ -1656,6 +1656,12 @@ export const webviewMessageHandler = async (
 			// provider shows the Unblock Condition confirmation before acting.
 			await provider.resumeBlockedTask()
 			break
+		case "continueTaskLifecycle":
+			// Harness-owned "continue lifecycle": the provider asks the resolver
+			// whether the canonical state already allows the next stage, so a chain
+			// that stopped without a stage outcome can be resumed.
+			await provider.continueTaskLifecycleFromCommand()
+			break
 		case "cancelAutoApproval":
 			// Cancel any pending auto-approval timeout for the current task
 			provider.getCurrentTask()?.cancelAutoApprovalTimeout()

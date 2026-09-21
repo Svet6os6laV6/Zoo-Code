@@ -30,7 +30,7 @@ export const STAGE_ARTIFACTS = {
 	code: ["README.md"],
 	refactor: ["README.md", "implementation/"],
 	reviewer: ["README.md", "implementation/", "handoff.md"],
-	qa: ["README.md", "handoff.md"],
+	qa: ["README.md", "handoff.md", "qa.md"],
 } as const satisfies Record<LifecycleMode, readonly string[]>
 
 /**
@@ -48,7 +48,7 @@ export const STAGE_DIRECTIVES = {
 	code: "Implement the assigned implementation unit, or the reported fix. Report RESCHEDULE_REQUIRED when the unit cannot proceed until another unit in implementation/ is done: record the dependency and the progress notes in the unit artifact first. Report BLOCKED only for obstacles the harness cannot remove itself (a user decision, missing credentials, an unavailable external service).",
 	refactor: "Restructure the completed implementation without changing behaviour.",
 	reviewer: "Review the implementation against the requirements and record findings.",
-	qa: "Verify the reviewed work against the acceptance criteria and record evidence.",
+	qa: "Verify the reviewed work against the acceptance criteria and record evidence in qa.md, including three ready-to-use commit message variants describing the task's changes.",
 } as const satisfies Record<LifecycleMode, string>
 
 export type StageInstructionInput = {

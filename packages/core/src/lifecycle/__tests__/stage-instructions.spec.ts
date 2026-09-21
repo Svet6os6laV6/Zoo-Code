@@ -43,6 +43,13 @@ describe("buildStageInstruction", () => {
 		expect(instruction).toContain(`${STAGE_FAILURE_KEY_MARKER} auth-token-expiry`)
 	})
 
+	it("asks the qa stage for three commit message variants in qa.md", () => {
+		expect(STAGE_ARTIFACTS.qa).toContain("qa.md")
+		expect(STAGE_DIRECTIVES.qa).toContain("qa.md")
+		expect(STAGE_DIRECTIVES.qa).toContain("three")
+		expect(STAGE_DIRECTIVES.qa).toContain("commit message")
+	})
+
 	it("describes an unnamed fix pass without inventing a key", () => {
 		const instruction = buildStageInstruction({
 			mode: "code",

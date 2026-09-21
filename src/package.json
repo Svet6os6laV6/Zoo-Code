@@ -3,7 +3,7 @@
 	"displayName": "%extension.displayName%",
 	"description": "%extension.description%",
 	"publisher": "ZooCodeOrganization",
-	"version": "3.82.1",
+	"version": "3.82.3",
 	"icon": "assets/icons/icon.png",
 	"galleryBanner": {
 		"color": "#617A91",
@@ -178,6 +178,21 @@
 			{
 				"command": "zoo-code.resumeBlockedTask",
 				"title": "%command.resumeBlockedTask.title%",
+				"category": "%configuration.title%"
+			},
+			{
+				"command": "zoo-code.continueTaskLifecycle",
+				"title": "%command.continueTaskLifecycle.title%",
+				"category": "%configuration.title%"
+			},
+			{
+				"command": "zoo-code.registerHarnessLogsMcp",
+				"title": "%command.registerHarnessLogsMcp.title%",
+				"category": "%configuration.title%"
+			},
+			{
+				"command": "zoo-code.unregisterHarnessLogsMcp",
+				"title": "%command.unregisterHarnessLogsMcp.title%",
 				"category": "%configuration.title%"
 			}
 		],

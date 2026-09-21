@@ -1346,4 +1346,125 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			expect.anything(),
 		)
 	})
+
+	describe("top-level lifecycle routing", () => {
+		const stageBlock = (result: string): AttemptCompletionToolUse => ({
+			type: "tool_use",
+			name: "attempt_completion",
+			params: { result },
+			nativeArgs: { result },
+			partial: false,
+		})
+
+		const callbacks = (overrides: Partial<AttemptCompletionCallbacks> = {}): AttemptCompletionCallbacks => ({
+			askApproval: vi.fn(),
+			handleError: vi.fn(),
+			pushToolResult: vi.fn(),
+			askFinishSubTaskApproval: vi.fn().mockResolvedValue(false),
+			toolDescription: vi.fn(),
+			...overrides,
+		})
+
+		it("hands a completed top-level stage to the harness instead of waiting for the user", async () => {
+			const continueTaskLifecycle = vi.fn().mockResolvedValue(true)
+			const pushToolResult = vi.fn()
+			const task = makeTask({ taskId: "parent-1" })
+			Object.assign(task, {
+				getTaskMode: vi.fn().mockResolvedValue("architect"),
+				providerRef: { deref: () => ({ continueTaskLifecycle }) },
+			})
+
+			await attemptCompletionTool.handle(
+				task as Task,
+				stageBlock("Plan is ready.\nStage Result: COMPLETED"),
+				callbacks({ pushToolResult }),
+			)
+
+			expect(continueTaskLifecycle).toHaveBeenCalledWith(task, "Plan is ready.\nStage Result: COMPLETED")
+			expect(task.ask).not.toHaveBeenCalled()
+			// The routed-away stage must not leave an unanswered tool_use behind.
+			expect(pushToolResult).toHaveBeenCalledWith("")
+			expect(task.flushTelemetryInstallment).toHaveBeenCalledTimes(1)
+			expect(task.emitFinalTokenUsageUpdate).toHaveBeenCalledTimes(1)
+		})
+
+		it("keeps the completion ask when the harness cannot advance the stage", async () => {
+			const continueTaskLifecycle = vi.fn().mockResolvedValue(false)
+			const task = makeTask({ taskId: "parent-1" })
+			Object.assign(task, {
+				getTaskMode: vi.fn().mockResolvedValue("code"),
+				providerRef: { deref: () => ({ continueTaskLifecycle }) },
+			})
+
+			await attemptCompletionTool.handle(task as Task, stageBlock("Stage Result: COMPLETED"), callbacks())
+
+			expect(continueTaskLifecycle).toHaveBeenCalledTimes(1)
+			expect(task.ask).toHaveBeenCalledWith("completion_result", "", false)
+			// Routing already reported the completion, so the fallthrough flush must not repeat it.
+			expect(task.flushTelemetryInstallment).toHaveBeenCalledTimes(1)
+		})
+
+		it("does not route a non-lifecycle mode even when the reply carries a stage marker", async () => {
+			const continueTaskLifecycle = vi.fn().mockResolvedValue(true)
+			const task = makeTask({ taskId: "parent-1" })
+			Object.assign(task, {
+				getTaskMode: vi.fn().mockResolvedValue("debug"),
+				providerRef: { deref: () => ({ continueTaskLifecycle }) },
+			})
+
+			await attemptCompletionTool.handle(task as Task, stageBlock("Stage Result: COMPLETED"), callbacks())
+
+			expect(continueTaskLifecycle).not.toHaveBeenCalled()
+			expect(task.ask).toHaveBeenCalled()
+		})
+
+		it("does not route a lifecycle mode whose reply has no unambiguous stage result", async () => {
+			const continueTaskLifecycle = vi.fn().mockResolvedValue(true)
+			const task = makeTask({ taskId: "parent-1" })
+			Object.assign(task, {
+				getTaskMode: vi.fn().mockResolvedValue("qa"),
+				providerRef: { deref: () => ({ continueTaskLifecycle }) },
+			})
+
+			await attemptCompletionTool.handle(task as Task, stageBlock("Everything looked fine."), callbacks())
+
+			expect(continueTaskLifecycle).not.toHaveBeenCalled()
+			expect(task.ask).toHaveBeenCalled()
+		})
+
+		it("leaves a delegated child on the existing parent-resume path", async () => {
+			const continueTaskLifecycle = vi.fn().mockResolvedValue(true)
+			const task = makeTask({ taskId: "child-1" })
+			Object.assign(task, {
+				parentTaskId: "parent-1",
+				getTaskMode: vi.fn().mockResolvedValue("code"),
+				providerRef: {
+					deref: () => ({
+						log: vi.fn(),
+						continueTaskLifecycle,
+						getTaskWithId: vi.fn().mockImplementation((id: string) =>
+							Promise.resolve({
+								historyItem:
+									id === "child-1"
+										? { id, status: "active" }
+										: { id, status: "active", awaitingChildId: "child-1" },
+							}),
+						),
+						setPendingTaskAction: vi.fn().mockResolvedValue(undefined),
+						reopenParentFromDelegation: vi.fn().mockResolvedValue(true),
+					}),
+				},
+			})
+			const askFinishSubTaskApproval = vi.fn().mockResolvedValue(false)
+
+			await attemptCompletionTool.handle(
+				task as Task,
+				stageBlock("Stage Result: COMPLETED"),
+				callbacks({ askFinishSubTaskApproval }),
+			)
+
+			expect(continueTaskLifecycle).not.toHaveBeenCalled()
+			expect(askFinishSubTaskApproval).toHaveBeenCalled()
+		})
+	})
 })

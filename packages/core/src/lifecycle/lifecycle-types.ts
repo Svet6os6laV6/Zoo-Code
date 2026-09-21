@@ -1,7 +1,9 @@
 import { z } from "zod"
 
+import type { ArtifactValidationReport } from "../worktree/artifact-validator.js"
 import { NO_FAILURE_KEY } from "../worktree/task-readme.js"
-import type { TaskStatus } from "../worktree/task-state.js"
+import type { TaskState, TaskStatus } from "../worktree/task-state.js"
+import type { ImplementationArtifacts } from "../worktree/txx-parser.js"
 
 /**
  * The stage vocabulary of the harness lifecycle. These are mode slugs the user
@@ -112,6 +114,20 @@ export type LifecycleResult =
 			readonly failure?: FailureTracking
 	  }
 	| { readonly type: "invalid"; readonly reason: string }
+
+/**
+ * The harness-owned input to `LifecycleController.resolve`: the canonical README
+ * state plus the implementation snapshot and its structural validation report.
+ *
+ * All three describe the same filesystem moment, so the resolver can decide
+ * whether the lifecycle may advance on its own — without a stage outcome and
+ * without asking the model to re-analyse the artifacts.
+ */
+export type LifecycleResolveInput = {
+	readonly state: TaskState
+	readonly artifacts: ImplementationArtifacts
+	readonly report: ArtifactValidationReport
+}
 
 export type ModeRunResult =
 	| { readonly type: "started"; readonly mode: LifecycleMode; readonly status: TaskStatus }

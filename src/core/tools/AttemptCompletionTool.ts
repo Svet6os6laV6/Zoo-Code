@@ -1,6 +1,7 @@
 import * as vscode from "vscode"
 
 import { RooCodeEventName, type HistoryItem, type PendingTaskAction } from "@roo-code/types"
+import { parseStageOutcome } from "@roo-code/core"
 
 import { Task } from "../task/Task"
 import { formatResponse } from "../prompts/responses"
@@ -19,6 +20,18 @@ interface AttemptCompletionParams {
 export interface AttemptCompletionCallbacks extends ToolCallbacks {
 	askFinishSubTaskApproval: () => Promise<boolean>
 	toolDescription: () => string
+}
+
+/**
+ * Interface for the provider method that advances the lifecycle of a top-level
+ * lifecycle stage after it reported its `Stage Result`.
+ *
+ * Kept separate from {@link DelegationProvider}: delegation is about a *child*
+ * returning to its parent, while lifecycle routing is about the harness starting
+ * the stage that follows, including for a task that has no parent.
+ */
+interface LifecycleRoutingProvider {
+	continueTaskLifecycle(task: Task, resultText: string): Promise<boolean>
 }
 
 /**
@@ -101,6 +114,47 @@ export class AttemptCompletionTool extends BaseTool<"attempt_completion"> {
 			// fallthrough flush from double-reporting when delegation falls through to
 			// "continue" instead of returning.
 			let hasFlushedTelemetry = false
+
+			// Programmatic lifecycle routing for a top-level stage. A lifecycle mode that
+			// reported a `Stage Result` hands the chain to the harness instead of waiting
+			// for the user to accept the completion -- the complaint this covers is the
+			// chain stopping after a top-level stage. `parseStageOutcome` is the gate for
+			// both halves of the condition: it accepts only the lifecycle modes and only
+			// an unambiguous marker, so a plain chat, `debug`, or a reply without a stage
+			// result keeps the completion ask.
+			if (!task.parentTaskId) {
+				try {
+					const lifecycleProvider = task.providerRef.deref() as LifecycleRoutingProvider | undefined
+					const mode = await task.getTaskMode()
+
+					if (lifecycleProvider && parseStageOutcome(mode, result)) {
+						// The harness may dispose this task while delegating the next stage,
+						// so the completion must be persisted first (same reason as the
+						// delegation branch below) and telemetry flushed exactly once.
+						const persistenceReady = await task.waitForCurrentAssistantMessagePersistence()
+						if (persistenceReady) {
+							task.flushTelemetryInstallment("attempt_completion")
+							hasFlushedTelemetry = true
+
+							if (await lifecycleProvider.continueTaskLifecycle(task, result)) {
+								// Mirrors the delegation branch below: the stage was routed away,
+								// so the completion must not leave an unanswered tool_use behind.
+								pushToolResult("")
+								task.emitFinalTokenUsageUpdate()
+								return
+							}
+						}
+					}
+				} catch (error) {
+					// Routing is an optimisation: a failure must leave the ordinary
+					// completion path intact instead of losing the stage result.
+					console.warn(
+						`[AttemptCompletionTool] Lifecycle routing failed for task ${task.taskId}: ${
+							error instanceof Error ? error.message : String(error)
+						}. Continuing with the completion ask.`,
+					)
+				}
+			}
 
 			// Check for subtask using parentTaskId (metadata-driven delegation)
 			if (task.parentTaskId) {
