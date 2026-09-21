@@ -82,6 +82,29 @@ describe.sequential("WorktreeService integration", () => {
 		expect(remainingWorktrees.some((worktree) => worktree.branch === "feature/integration")).toBe(false)
 	}, 30_000)
 
+	it("should return the initial branch name after git init without any commits", async () => {
+		const unbornDir = path.join(tempDir, "unborn-init")
+		await fs.mkdir(unbornDir, { recursive: true })
+		await execGit(unbornDir, ["init", "-b", "trunk"])
+
+		await expect(service.getCurrentBranch(unbornDir)).resolves.toBe("trunk")
+	}, 30_000)
+
+	it("should return the branch name after checkout -b without any commits", async () => {
+		const unbornDir = path.join(tempDir, "unborn-checkout")
+		await fs.mkdir(unbornDir, { recursive: true })
+		await execGit(unbornDir, ["init", "-b", "trunk"])
+		await execGit(unbornDir, ["checkout", "-b", "fresh"])
+
+		await expect(service.getCurrentBranch(unbornDir)).resolves.toBe("fresh")
+	}, 30_000)
+
+	it("should return null on a detached HEAD", async () => {
+		await execGit(repoDir, ["checkout", "--detach"])
+
+		await expect(service.getCurrentBranch(repoDir)).resolves.toBeNull()
+	}, 30_000)
+
 	it("should exclude worktree branches from available branches unless requested", async () => {
 		const worktreePath = path.join(tempDir, "feature-worktree")
 
