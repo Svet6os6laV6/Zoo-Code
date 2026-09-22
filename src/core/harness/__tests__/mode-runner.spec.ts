@@ -45,7 +45,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(state) },
-			controller: { transition, resume: vi.fn(), resolve: vi.fn() },
+			controller: { transition, resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -55,7 +55,7 @@ describe("HarnessModeRunner", () => {
 			"Review complete.\nStage Result: PASSED\nNext Mode: code",
 		)
 
-		expect(transition).toHaveBeenCalledWith(state, { mode: "reviewer", result: "PASSED", failureKey: null })
+		expect(transition).toHaveBeenCalledWith(state, { mode: "reviewer", result: "PASSED", failureKey: null }, {})
 		expect(run).toHaveBeenCalledWith(context, state, expectedDecision)
 		expect(result).toEqual(expectedResult)
 	})
@@ -64,7 +64,7 @@ describe("HarnessModeRunner", () => {
 		const resolve = vi.fn()
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve },
-			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn() },
+			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn() },
 			modeRunner: { run: vi.fn() },
 		})
 
@@ -88,6 +88,7 @@ describe("HarnessModeRunner", () => {
 				}),
 				resume: vi.fn(),
 				resolve: vi.fn(),
+				approvePlan: vi.fn(),
 			},
 			modeRunner: { run: vi.fn().mockResolvedValue({ type: "invalid", reason: "No ready task" }) },
 		})
@@ -168,7 +169,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(blocked) },
-			controller: { transition: vi.fn(), resume, resolve: vi.fn() },
+			controller: { transition: vi.fn(), resume, resolve: vi.fn(), approvePlan: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -187,6 +188,7 @@ describe("HarnessModeRunner", () => {
 				transition: vi.fn(),
 				resume: vi.fn().mockReturnValue({ type: "invalid", reason: "Unblock Condition unconfirmed" }),
 				resolve: vi.fn(),
+				approvePlan: vi.fn(),
 			},
 			modeRunner: { run },
 		})
@@ -233,7 +235,7 @@ function validationReport(valid: boolean): ArtifactValidationReport {
 }
 
 describe("HarnessModeRunner.continue", () => {
-	it("advances ANALYSIS with a ready plan to Code without a stage outcome", async () => {
+	it("advances ANALYSIS with a ready plan to Code when the approval gate is off", async () => {
 		const analysisState: TaskState = { ...state, status: "ANALYSIS" }
 		const snapshot = artifacts(2)
 		const report = validationReport(true)
@@ -248,7 +250,10 @@ describe("HarnessModeRunner.continue", () => {
 			validator: { validate },
 		})
 
-		const result = await runner.continue({ getTaskContext: vi.fn().mockResolvedValue(context) })
+		const result = await runner.continue(
+			{ getTaskContext: vi.fn().mockResolvedValue(context) },
+			{ requirePlanApproval: false },
+		)
 
 		expect(read).toHaveBeenCalledWith(context)
 		expect(validate).toHaveBeenCalledWith(context, { status: "ANALYSIS" }, snapshot)
@@ -257,6 +262,32 @@ describe("HarnessModeRunner.continue", () => {
 			status: "READY_FOR_IMPLEMENTATION",
 		})
 		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+	})
+
+	it("stops at PLAN_READY when the approval gate is on and starts no mode", async () => {
+		const analysisState: TaskState = { ...state, status: "ANALYSIS" }
+		const snapshot = artifacts(2)
+		const report = validationReport(true)
+		const run = vi.fn().mockResolvedValue({ type: "stopped", status: "PLAN_READY", reason: "plan-approval" })
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(analysisState) },
+			controller: new LifecycleController(),
+			modeRunner: { run },
+			parser: { read: vi.fn().mockResolvedValue(snapshot) },
+			validator: { validate: vi.fn().mockResolvedValue(report) },
+		})
+
+		const result = await runner.continue(
+			{ getTaskContext: vi.fn().mockResolvedValue(context) },
+			{ requirePlanApproval: true },
+		)
+
+		expect(run).toHaveBeenCalledWith(context, analysisState, {
+			type: "stop",
+			status: "PLAN_READY",
+			reason: "plan-approval",
+		})
+		expect(result).toEqual({ type: "stopped", status: "PLAN_READY", reason: "plan-approval" })
 	})
 
 	it("returns null when the analysis artifacts are not ready", async () => {
@@ -297,5 +328,48 @@ describe("HarnessModeRunner.continue", () => {
 		})
 
 		expect(await runner.continue({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
+	})
+})
+
+describe("HarnessModeRunner.approvePlan", () => {
+	it("approves a PLAN_READY task and starts the first ready unit", async () => {
+		const planReady: TaskState = { ...state, status: "PLAN_READY" }
+		const expectedResult: ModeRunResult = { type: "started", mode: "code", status: "IMPLEMENTATION" }
+		const approvePlan = vi.fn().mockReturnValue({
+			type: "resume_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+		const run = vi.fn().mockResolvedValue(expectedResult)
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(planReady) },
+			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn(), approvePlan },
+			modeRunner: { run },
+		})
+
+		const result = await runner.approvePlan({ getTaskContext: vi.fn().mockResolvedValue(context) })
+
+		expect(approvePlan).toHaveBeenCalledWith(planReady)
+		expect(run).toHaveBeenCalledWith(context, planReady, {
+			type: "resume_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+		expect(result).toEqual(expectedResult)
+	})
+
+	it("returns null when the task is not at PLAN_READY", async () => {
+		const run = vi.fn()
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue({ ...state, status: "IMPLEMENTATION" }) },
+			controller: {
+				transition: vi.fn(),
+				resume: vi.fn(),
+				resolve: vi.fn(),
+				approvePlan: vi.fn().mockReturnValue({ type: "invalid", reason: "not PLAN_READY" }),
+			},
+			modeRunner: { run },
+		})
+
+		expect(await runner.approvePlan({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
+		expect(run).not.toHaveBeenCalled()
 	})
 })

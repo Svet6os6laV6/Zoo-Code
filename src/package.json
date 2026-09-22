@@ -3,7 +3,7 @@
 	"displayName": "%extension.displayName%",
 	"description": "%extension.description%",
 	"publisher": "ZooCodeOrganization",
-	"version": "3.82.3",
+	"version": "3.82.4",
 	"icon": "assets/icons/icon.png",
 	"galleryBanner": {
 		"color": "#617A91",
@@ -183,6 +183,11 @@
 			{
 				"command": "zoo-code.continueTaskLifecycle",
 				"title": "%command.continueTaskLifecycle.title%",
+				"category": "%configuration.title%"
+			},
+			{
+				"command": "zoo-code.approvePlan",
+				"title": "%command.approvePlan.title%",
 				"category": "%configuration.title%"
 			},
 			{

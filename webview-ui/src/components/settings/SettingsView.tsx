@@ -39,6 +39,7 @@ import {
 	DEFAULT_AUTO_CLOSE_ZOO_OPENED_FILES_AFTER_USER_EDITED,
 	DEFAULT_AUTO_CLOSE_ZOO_OPENED_NEW_FILES,
 	DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
+	DEFAULT_REQUIRE_PLAN_APPROVAL,
 	ImageGenerationProvider,
 } from "@roo-code/types"
 
@@ -164,6 +165,7 @@ const SettingsView = forwardRef<SettingsViewRef, SettingsViewProps>(({ onDone, t
 		language,
 		alwaysAllowExecute,
 		destructiveCommandGuardEnabled,
+		requirePlanApproval,
 		alwaysAllowMcp,
 		alwaysAllowModeSwitch,
 		alwaysAllowSubtasks,
@@ -393,6 +395,7 @@ const SettingsView = forwardRef<SettingsViewRef, SettingsViewProps>(({ onDone, t
 					allowedWriteFiles: allowedWriteFiles ?? [],
 					alwaysAllowExecute: alwaysAllowExecute ?? undefined,
 					destructiveCommandGuardEnabled: destructiveCommandGuardEnabled ?? false,
+					requirePlanApproval: requirePlanApproval ?? DEFAULT_REQUIRE_PLAN_APPROVAL,
 					alwaysAllowMcp,
 					alwaysAllowModeSwitch,
 					allowedCommands: allowedCommands ?? [],
@@ -823,6 +826,7 @@ const SettingsView = forwardRef<SettingsViewRef, SettingsViewProps>(({ onDone, t
 								alwaysAllowSubtasks={alwaysAllowSubtasks}
 								alwaysAllowExecute={alwaysAllowExecute}
 								destructiveCommandGuardEnabled={destructiveCommandGuardEnabled}
+								requirePlanApproval={requirePlanApproval}
 								alwaysAllowFollowupQuestions={alwaysAllowFollowupQuestions}
 								followupAutoApproveTimeoutMs={followupAutoApproveTimeoutMs}
 								allowedCommands={allowedCommands}

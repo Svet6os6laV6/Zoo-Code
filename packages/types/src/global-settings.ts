@@ -50,6 +50,16 @@ export const DEFAULT_DIFF_FUZZY_THRESHOLD = 1.0
 export const DEFAULT_DESTRUCTIVE_COMMAND_GUARD_ENABLED = false
 
 /**
+ * Default for the plan-approval gate.
+ *
+ * When enabled the task lifecycle stops after a plan is produced and waits for an
+ * explicit user approval before implementation begins. It defaults to `true` so a
+ * plan is never implemented without review; set it to `false` to let the harness
+ * continue automatically.
+ */
+export const DEFAULT_REQUIRE_PLAN_APPROVAL = true
+
+/**
  * Terminal output preview size options for persisted command output.
  *
  * Controls how much command output is kept in memory as a "preview" before
@@ -154,6 +164,7 @@ export const globalSettingsSchema = z.object({
 	alwaysAllowSubtasks: z.boolean().optional(),
 	alwaysAllowExecute: z.boolean().optional(),
 	destructiveCommandGuardEnabled: z.boolean().optional(),
+	requirePlanApproval: z.boolean().optional(),
 	alwaysAllowFollowupQuestions: z.boolean().optional(),
 	followupAutoApproveTimeoutMs: z.number().optional(),
 	allowedCommands: z.array(z.string()).optional(),

@@ -365,6 +365,10 @@
 		"description": "Run these actions without asking for permission. Only enable for actions you fully trust and if you understand the security risks.",
 		"toggleShortcut": "You can configure a keyboard shortcut for this setting <SettingsLink>in your IDE preferences</SettingsLink>.",
 		"enabled": "Auto-Approve Enabled",
+		"requirePlanApproval": {
+			"label": "Require plan approval",
+			"description": "Pause after a plan is produced and wait for your explicit approval before implementation begins. When disabled, Zoo continues automatically from planning into implementation."
+		},
 		"readOnly": {
 			"label": "Read",
 			"description": "When enabled, Zoo will automatically view directory contents and read files without requiring you to click the Approve button.",

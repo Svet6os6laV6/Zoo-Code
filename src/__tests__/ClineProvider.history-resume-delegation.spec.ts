@@ -181,7 +181,9 @@ describe("History resume delegation - parent metadata transitions", () => {
 		})
 
 		expect(result).toBe(true)
-		expect(runHarnessLifecycle).toHaveBeenCalledWith(parentInstance, "reviewer", "Stage Result: PASSED")
+		expect(runHarnessLifecycle).toHaveBeenCalledWith(parentInstance, "reviewer", "Stage Result: PASSED", {
+			requirePlanApproval: true,
+		})
 		expect(schedule).not.toHaveBeenCalled()
 		expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
 	})

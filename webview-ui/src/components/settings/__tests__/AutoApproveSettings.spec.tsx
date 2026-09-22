@@ -213,6 +213,21 @@ describe("AutoApproveSettings - Save/Discard contract", () => {
 		expectNoImmediateUpdateSettings()
 	})
 
+	it("renders the plan approval setting from cached settings", () => {
+		renderSettings({ requirePlanApproval: true })
+
+		expect(screen.getByTestId("require-plan-approval-checkbox")).toBeChecked()
+	})
+
+	it("buffers disabling plan approval without persisting before Save", () => {
+		const { setCachedStateField } = renderSettings({ requirePlanApproval: true })
+
+		fireEvent.click(screen.getByTestId("require-plan-approval-checkbox"))
+
+		expect(setCachedStateField).toHaveBeenCalledWith("requirePlanApproval", false)
+		expectNoImmediateUpdateSettings()
+	})
+
 	it("hides Zoo command list editors while destructive command guard is enabled", () => {
 		renderSettings({ destructiveCommandGuardEnabled: true, deniedCommands: ["rm -rf"] })
 

@@ -28,6 +28,7 @@
 	"command.toggleAutoApprove.title": "Toggle Auto-Approve",
 	"command.resumeBlockedTask.title": "Resume Blocked Task",
 	"command.continueTaskLifecycle.title": "Continue Task Lifecycle",
+	"command.approvePlan.title": "Approve Plan",
 	"command.registerHarnessLogsMcp.title": "Register Harness Log MCP Server",
 	"command.unregisterHarnessLogsMcp.title": "Unregister Harness Log MCP Server",
 	"configuration.title": "Zoo Code",

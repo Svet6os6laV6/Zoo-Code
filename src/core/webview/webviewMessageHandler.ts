@@ -1656,6 +1656,11 @@ export const webviewMessageHandler = async (
 			// provider shows the Unblock Condition confirmation before acting.
 			await provider.resumeBlockedTask()
 			break
+		case "approvePlan":
+			// Harness-owned approval of a task stopped at `Status: PLAN_READY`; the
+			// provider shows the confirmation before recomputing the DAG.
+			await provider.approvePlanTask()
+			break
 		case "continueTaskLifecycle":
 			// Harness-owned "continue lifecycle": the provider asks the resolver
 			// whether the canonical state already allows the next stage, so a chain

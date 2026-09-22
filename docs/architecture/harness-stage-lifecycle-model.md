@@ -75,7 +75,7 @@ lose:
 
 | Current status                   | Mode      | Outcome                               | Decision                                                                                                                      |
 | -------------------------------- | --------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `ANALYSIS`                       | architect | `COMPLETED`                           | `schedule_implementation` → `READY_FOR_IMPLEMENTATION`                                                                        |
+| `ANALYSIS`                       | architect | `COMPLETED`                           | stop at `PLAN_READY` when `requirePlanApproval` (default), else `schedule_implementation` → `READY_FOR_IMPLEMENTATION`        |
 | `IMPLEMENTATION`                 | code      | `COMPLETED`                           | `schedule_implementation` → scheduler assigns the next ready unit, or `READY_FOR_REFACTOR` + refactor when every unit is done |
 | `IMPLEMENTATION`                 | code      | `RESCHEDULE_REQUIRED`                 | park the unit (`IN_PROGRESS` → `TODO`), clear the assignment, `TaskScheduler.assignNext` recomputes the DAG                   |
 | `READY_FOR_REFACTOR`, `REFACTOR` | refactor  | `COMPLETED`                           | `READY_FOR_REVIEW` + reviewer                                                                                                 |
@@ -130,6 +130,36 @@ controller can observe. When it holds, the controller returns `resume_implementa
 
 The `BLOCKED` → `READY_FOR_IMPLEMENTATION` edge is the only edge out of `BLOCKED`; it is declared in
 `TASK_STATUS_TRANSITIONS`, so a resume cannot write a status the canonical machine does not allow.
+
+## Plan approval gate
+
+`PLAN_READY` is the approval gate between analysis and implementation. When the gate is on, a
+completed Architect stage stops here instead of handing straight to Code, so a human can review the
+plan before any implementation unit is assigned. The gate is controlled by the `requirePlanApproval`
+setting (default `true`); when it is off, the Architect stage keeps its historical
+`schedule_implementation` decision and the task moves to `READY_FOR_IMPLEMENTATION` directly.
+
+Like `BLOCKED`, `PLAN_READY` is not routable from a stage outcome: no mode runs while the task waits
+for approval, so no stage result leaves it. It is left only by the harness-owned approve action.
+`LifecycleController.approvePlan(state)` is pure, like `transition` and `resume`: it validates the
+`PLAN_READY` → `READY_FOR_IMPLEMENTATION` edge against `TASK_STATUS_TRANSITIONS` and returns
+`resume_implementation`, which `ModeRunner` applies by:
+
+1. writing `READY_FOR_IMPLEMENTATION` and clearing `Current Task`;
+2. letting `TaskScheduler` re-read the DAG from disk and assign the first ready unit, or move to
+   Refactor when every unit is `DONE`.
+
+The user may edit the plan artifacts before approving; because the scheduler re-reads the DAG from
+disk, an approval always acts on the current plan rather than a snapshot taken at the stop. The
+integration surfaces the gate as the `zoo-code.approvePlan` command and the `approvePlan` webview
+message, and the stop notification points the user at that command.
+
+The `PLAN_READY` → `READY_FOR_IMPLEMENTATION` edge is the only edge out of `PLAN_READY`; it is
+declared in `TASK_STATUS_TRANSITIONS`, so an approval cannot write a status the canonical machine
+does not allow. If the DAG has no ready unit after approval (for example the user broke it while
+editing), the task stays at `READY_FOR_IMPLEMENTATION` with `Current Task: NONE` — the canonical
+resumable state — and the user retries through the "continue lifecycle" command
+(`zoo-code.continueTaskLifecycle`).
 
 ## The report protocol
 
@@ -188,30 +218,32 @@ violate it.
 
 Everything that can go wrong degrades to the legacy behaviour instead of failing the task:
 
-| Failure                                                    | Result                                                                |
-| ---------------------------------------------------------- | --------------------------------------------------------------------- |
-| Not a lifecycle mode, or no unambiguous report             | `HarnessModeRunner.run` returns `null`; the parent resumes as before. |
-| Mode/status mismatch, or a non-canonical status transition | `invalid`; the parent resumes as before.                              |
-| Selected mode is not configured                            | `startMode` throws `LifecycleError`; the parent resumes as before.    |
-| README has no canonical `Status` line                      | `LifecycleError`; the parent resumes as before.                       |
-| Scheduler cannot produce a next stage                      | `invalid`; the parent resumes as before.                              |
+| Failure                                                    | Result                                                                                                       |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Not a lifecycle mode, or no unambiguous report             | `HarnessModeRunner.run` returns `null`; the parent resumes as before.                                        |
+| Mode/status mismatch, or a non-canonical status transition | `invalid`; the parent resumes as before.                                                                     |
+| Selected mode is not configured                            | `startMode` throws `LifecycleError`; the parent resumes as before.                                           |
+| README has no canonical `Status` line                      | `LifecycleError`; the parent resumes as before.                                                              |
+| Scheduler cannot produce a next stage                      | `invalid`; the parent resumes as before.                                                                     |
+| Approval with no ready unit (DAG broken by an edit)        | task stays at `READY_FOR_IMPLEMENTATION` + `Current Task: NONE`; retry via the "continue lifecycle" command. |
 
 | Attempt budget exhausted (`max-attempts`) | `stop` at `BLOCKED`; the parent resumes as before. |
 
 ## Where the invariants are enforced
 
-| Invariant                                                 | Enforced by                                                                                                                                |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| No status is written outside `TASK_STATUS_TRANSITIONS`    | `LifecycleController.transition`                                                                                                           |
-| A mode only completes a status its stage owns             | `MODE_STATUSES` precondition check                                                                                                         |
-| Every status a mode claims can actually be routed         | controller spec, `claims only stage/status pairs that can actually be routed`                                                              |
-| Every decision the cross-product can produce is canonical | controller spec, `only ever writes canonical task status transitions`                                                                      |
-| The instruction and the parser agree on the marker        | `packages/core/src/lifecycle/__tests__/mode-runner.spec.ts`, `asks the stage for the outcome marker the parser reads back`                 |
-| Only one writer mutates the README block                  | `CanonicalReadmeWriter` is the sole read-modify-write path for `ModeRunner`; `TaskScheduler` uses the same field writer and atomic write   |
-| A schedulable cause never stops the lifecycle             | `LifecycleController.decide` routes `code` + `IMPLEMENTATION` + `RESCHEDULE_REQUIRED` to `reschedule_implementation`; only `BLOCKED` stops |
-| A parked unit returns to the DAG                          | `parkImplementationTask` rewrites `IN_PROGRESS` → `TODO`; `readyTasks` re-includes it once its dependency is `DONE`                        |
-| A reschedule cannot loop on the same unit                 | `ModeRunner` refuses a reschedule that left the parked unit ready                                                                          |
-| `BLOCKED` resumes only through the harness action         | `LifecycleController.resume` requires the Unblock Condition and returns the canonical `BLOCKED` → `READY_FOR_IMPLEMENTATION` edge          |
+| Invariant                                                 | Enforced by                                                                                                                                  |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| No status is written outside `TASK_STATUS_TRANSITIONS`    | `LifecycleController.transition`                                                                                                             |
+| A mode only completes a status its stage owns             | `MODE_STATUSES` precondition check                                                                                                           |
+| Every status a mode claims can actually be routed         | controller spec, `claims only stage/status pairs that can actually be routed`                                                                |
+| Every decision the cross-product can produce is canonical | controller spec, `only ever writes canonical task status transitions`                                                                        |
+| The instruction and the parser agree on the marker        | `packages/core/src/lifecycle/__tests__/mode-runner.spec.ts`, `asks the stage for the outcome marker the parser reads back`                   |
+| Only one writer mutates the README block                  | `CanonicalReadmeWriter` is the sole read-modify-write path for `ModeRunner`; `TaskScheduler` uses the same field writer and atomic write     |
+| A schedulable cause never stops the lifecycle             | `LifecycleController.decide` routes `code` + `IMPLEMENTATION` + `RESCHEDULE_REQUIRED` to `reschedule_implementation`; only `BLOCKED` stops   |
+| A parked unit returns to the DAG                          | `parkImplementationTask` rewrites `IN_PROGRESS` → `TODO`; `readyTasks` re-includes it once its dependency is `DONE`                          |
+| A reschedule cannot loop on the same unit                 | `ModeRunner` refuses a reschedule that left the parked unit ready                                                                            |
+| `BLOCKED` resumes only through the harness action         | `LifecycleController.resume` requires the Unblock Condition and returns the canonical `BLOCKED` → `READY_FOR_IMPLEMENTATION` edge            |
+| `PLAN_READY` is left only through the harness action      | `LifecycleController.approvePlan` returns the canonical `PLAN_READY` → `READY_FOR_IMPLEMENTATION` edge; no stage outcome leaves `PLAN_READY` |
 
 ## Known limitation
 

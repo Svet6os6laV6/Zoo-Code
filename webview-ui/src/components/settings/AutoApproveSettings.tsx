@@ -32,6 +32,7 @@ type AutoApproveSettingsProps = HTMLAttributes<HTMLDivElement> & {
 	alwaysAllowSubtasks?: boolean
 	alwaysAllowExecute?: boolean
 	destructiveCommandGuardEnabled?: boolean
+	requirePlanApproval?: boolean
 	alwaysAllowFollowupQuestions?: boolean
 	followupAutoApproveTimeoutMs?: number
 	allowedCommands?: string[]
@@ -51,6 +52,7 @@ type AutoApproveSettingsProps = HTMLAttributes<HTMLDivElement> & {
 		| "alwaysAllowSubtasks"
 		| "alwaysAllowExecute"
 		| "destructiveCommandGuardEnabled"
+		| "requirePlanApproval"
 		| "alwaysAllowFollowupQuestions"
 		| "followupAutoApproveTimeoutMs"
 		| "allowedCommands"
@@ -73,6 +75,7 @@ export const AutoApproveSettings = ({
 	alwaysAllowSubtasks,
 	alwaysAllowExecute,
 	destructiveCommandGuardEnabled,
+	requirePlanApproval,
 	alwaysAllowFollowupQuestions,
 	followupAutoApproveTimeoutMs = 60000,
 	allowedCommands,
@@ -174,6 +177,21 @@ export const AutoApproveSettings = ({
 						onMaxRequestsChange={(value) => setCachedStateField("allowedMaxRequests", value)}
 						onMaxCostChange={(value) => setCachedStateField("allowedMaxCost", value)}
 					/>
+
+					<SearchableSetting
+						settingId="require-plan-approval"
+						section="autoApprove"
+						label={t("settings:autoApprove.requirePlanApproval.label")}>
+						<VSCodeCheckbox
+							checked={requirePlanApproval}
+							onChange={(e: any) => setCachedStateField("requirePlanApproval", e.target.checked)}
+							data-testid="require-plan-approval-checkbox">
+							<span className="font-medium">{t("settings:autoApprove.requirePlanApproval.label")}</span>
+						</VSCodeCheckbox>
+						<div className="text-vscode-descriptionForeground text-sm mt-1">
+							{t("settings:autoApprove.requirePlanApproval.description")}
+						</div>
+					</SearchableSetting>
 				</div>
 
 				{/* ADDITIONAL SETTINGS */}

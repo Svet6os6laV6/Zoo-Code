@@ -6,6 +6,8 @@ import type { Task } from "../../task/Task"
 
 const continueHarness = vi.hoisted(() => vi.fn())
 const runHarness = vi.hoisted(() => vi.fn())
+const approveHarness = vi.hoisted(() => vi.fn())
+const resolveState = vi.hoisted(() => vi.fn())
 const showInformationMessage = vi.hoisted(() => vi.fn())
 const showWarningMessage = vi.hoisted(() => vi.fn())
 const showErrorMessage = vi.hoisted(() => vi.fn())
@@ -48,8 +50,21 @@ vi.mock("../../harness/mode-runner", () => ({
 		run = runHarness
 		continue = continueHarness
 		resume = vi.fn()
+		approvePlan = approveHarness
 	},
 }))
+
+// `approvePlanTask` resolves the canonical lifecycle state before delegating, like
+// `resumeBlockedTask`; the resolver is replaced so the spec controls the status.
+vi.mock("@roo-code/core", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@roo-code/core")>()
+	return {
+		...actual,
+		TaskStateResolver: class {
+			resolve = resolveState
+		},
+	}
+})
 
 import { ClineProvider, startTaskUnlessLifecycleAdvanced } from "../ClineProvider"
 
@@ -57,6 +72,7 @@ import { ClineProvider, startTaskUnlessLifecycleAdvanced } from "../ClineProvide
 type ProviderStub = ClineProvider & {
 	getCurrentTask: ReturnType<typeof vi.fn>
 	log: ReturnType<typeof vi.fn>
+	getValue: ReturnType<typeof vi.fn>
 	getState: ReturnType<typeof vi.fn>
 	delegateParentAndOpenChild: ReturnType<typeof vi.fn>
 	taskHistoryStore: { get: ReturnType<typeof vi.fn> }
@@ -90,6 +106,7 @@ function makeProvider(overrides: { mode?: string; history?: Record<string, unkno
 	const provider = Object.assign(Object.create(ClineProvider.prototype) as ProviderStub, {
 		getCurrentTask: vi.fn(() => task),
 		log: vi.fn(),
+		getValue: vi.fn().mockReturnValue(true),
 		getState: vi.fn().mockResolvedValue({ customModes: [] }),
 		delegateParentAndOpenChild: vi.fn().mockResolvedValue(task),
 		taskHistoryStore: { get: vi.fn(() => overrides.history) },
@@ -109,8 +126,17 @@ describe("ClineProvider.continueTaskLifecycle", () => {
 		const { provider, task } = makeProvider()
 
 		expect(await provider.continueTaskLifecycle(task as unknown as Task)).toBe(true)
-		expect(continueHarness).toHaveBeenCalledWith(task)
+		expect(continueHarness).toHaveBeenCalledWith(task, { requirePlanApproval: true })
 		expect(runHarness).not.toHaveBeenCalled()
+	})
+
+	it("forwards the persisted approval setting to the runner", async () => {
+		const { provider, task } = makeProvider()
+		provider.getValue.mockReturnValue(false)
+
+		await provider.continueTaskLifecycle(task as unknown as Task)
+
+		expect(continueHarness).toHaveBeenCalledWith(task, { requirePlanApproval: false })
 	})
 
 	it("declines a delegated child: it must run its own stage", async () => {
@@ -127,8 +153,18 @@ describe("ClineProvider.continueTaskLifecycle", () => {
 		expect(
 			await provider.continueTaskLifecycle(task as unknown as Task, "Plan ready.\nStage Result: COMPLETED"),
 		).toBe(true)
-		expect(runHarness).toHaveBeenCalledWith(task, "architect", "Plan ready.\nStage Result: COMPLETED")
+		expect(runHarness).toHaveBeenCalledWith(task, "architect", "Plan ready.\nStage Result: COMPLETED", {
+			requirePlanApproval: true,
+		})
 		expect(continueHarness).not.toHaveBeenCalled()
+	})
+
+	it("tells the user the plan awaits approval when the chain stops at PLAN_READY", async () => {
+		const { provider, task } = makeProvider({ mode: "architect" })
+		runHarness.mockResolvedValue({ type: "stopped", status: "PLAN_READY", reason: "plan-approval" })
+
+		expect(await provider.continueTaskLifecycle(task as unknown as Task, "Stage Result: COMPLETED")).toBe(true)
+		expect(showInformationMessage).toHaveBeenCalledWith(expect.stringContaining("waiting for plan approval"))
 	})
 
 	it("declines a non-lifecycle mode without consulting the runner", async () => {
@@ -264,5 +300,86 @@ describe("ClineProvider.continueTaskLifecycleFromCommand", () => {
 
 		expect(continueHarness).toHaveBeenCalledTimes(1)
 		expect(showInformationMessage).not.toHaveBeenCalled()
+	})
+})
+
+function planReadyState(status = "PLAN_READY") {
+	return {
+		taskId: "SITESUP-1119",
+		status,
+		currentTask: null,
+		currentTaskArtifact: null,
+		failureKey: null,
+		failureAttempts: 0,
+	}
+}
+
+describe("ClineProvider.approvePlanTask", () => {
+	beforeEach(() => {
+		vi.clearAllMocks()
+		approveHarness.mockResolvedValue({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+	})
+
+	it("does nothing when there is no current task", async () => {
+		const { provider } = makeProvider()
+		provider.getCurrentTask.mockReturnValue(undefined)
+
+		await provider.approvePlanTask()
+
+		expect(showInformationMessage).toHaveBeenCalledWith("No active task to approve.")
+		expect(approveHarness).not.toHaveBeenCalled()
+	})
+
+	it("does not prompt when the task is not waiting for approval", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState("IMPLEMENTATION"))
+
+		await provider.approvePlanTask()
+
+		expect(showInformationMessage).toHaveBeenCalledWith(expect.stringContaining("is not waiting for plan approval"))
+		expect(showWarningMessage).not.toHaveBeenCalled()
+		expect(approveHarness).not.toHaveBeenCalled()
+	})
+
+	it("leaves the task unchanged when the user does not confirm", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState())
+		showWarningMessage.mockResolvedValue(undefined)
+
+		await provider.approvePlanTask()
+
+		expect(showWarningMessage).toHaveBeenCalledWith(expect.any(String), { modal: true }, "Approve")
+		expect(approveHarness).not.toHaveBeenCalled()
+	})
+
+	it("approves the plan after the user confirms", async () => {
+		const { provider, task } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState())
+		showWarningMessage.mockResolvedValue("Approve")
+
+		await provider.approvePlanTask()
+
+		expect(approveHarness).toHaveBeenCalledWith(task)
+	})
+
+	it("warns when the harness cannot approve the task", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState())
+		showWarningMessage.mockResolvedValue("Approve")
+		approveHarness.mockResolvedValue(null)
+
+		await provider.approvePlanTask()
+
+		expect(showWarningMessage).toHaveBeenCalledWith(expect.stringContaining("could not be approved"))
+	})
+
+	it("reports a state resolution failure without approving", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockRejectedValue(new Error("boom"))
+
+		await provider.approvePlanTask()
+
+		expect(showErrorMessage).toHaveBeenCalledWith("Could not read the task lifecycle state.")
+		expect(approveHarness).not.toHaveBeenCalled()
 	})
 })

@@ -804,3 +804,50 @@ describe("SettingsView - Duplicate Commands", () => {
 		expect(onDone).toHaveBeenCalledTimes(1)
 	})
 })
+
+describe("SettingsView - Require Plan Approval", () => {
+	beforeEach(() => {
+		vi.clearAllMocks()
+	})
+
+	it("buffers the plan approval toggle and saves it on Save", async () => {
+		// `settingsImportedAt` forces the cachedState to adopt the hydrated state,
+		// mirroring how a saved setting reaches the control.
+		const { activateTab, getSettingsContent } = renderSettingsView({
+			requirePlanApproval: true,
+			settingsImportedAt: new Date().toISOString(),
+		})
+
+		activateTab("autoApprove")
+
+		const checkbox = await within(getSettingsContent()).findByTestId("require-plan-approval-checkbox")
+		await waitFor(() => expect(checkbox).toBeChecked())
+
+		// Toggling off must only buffer; it must not persist before Save.
+		fireEvent.click(checkbox)
+		expect(vscode.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "updateSettings" }))
+
+		fireEvent.click(screen.getByTestId("save-button"))
+
+		expect(vscode.postMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "updateSettings",
+				updatedSettings: expect.objectContaining({ requirePlanApproval: false }),
+			}),
+		)
+	})
+
+	it("defaults plan approval to enabled when the setting is unset", () => {
+		const { activateTab } = renderSettingsView()
+
+		activateTab("autoApprove")
+		fireEvent.click(screen.getByTestId("save-button"))
+
+		expect(vscode.postMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "updateSettings",
+				updatedSettings: expect.objectContaining({ requirePlanApproval: true }),
+			}),
+		)
+	})
+})

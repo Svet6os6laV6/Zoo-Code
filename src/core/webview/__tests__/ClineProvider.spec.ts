@@ -1589,6 +1589,32 @@ describe("ClineProvider", () => {
 		expect(state.destructiveCommandGuardEnabled).toBe(false)
 	})
 
+	test("getState returns the saved require plan approval setting", async () => {
+		await provider.contextProxy.setValue("requirePlanApproval", false)
+
+		const state = await provider.getState()
+
+		expect(state.requirePlanApproval).toBe(false)
+	})
+
+	test("getStateToPostToWebview returns the saved require plan approval setting", async () => {
+		await provider.resolveWebviewView(mockWebviewView)
+
+		await provider.contextProxy.setValue("requirePlanApproval", false)
+		expect((await provider.getStateToPostToWebview()).requirePlanApproval).toBe(false)
+
+		await provider.contextProxy.setValue("requirePlanApproval", true)
+		expect((await provider.getStateToPostToWebview()).requirePlanApproval).toBe(true)
+	})
+
+	test("getStateToPostToWebview defaults require plan approval to enabled", async () => {
+		await provider.resolveWebviewView(mockWebviewView)
+
+		const state = await provider.getStateToPostToWebview()
+
+		expect(state.requirePlanApproval).toBe(true)
+	})
+
 	test("language is set to VSCode language", async () => {
 		// Mock VSCode language as Spanish
 		;(vscode.env as any).language = "pt-BR"
