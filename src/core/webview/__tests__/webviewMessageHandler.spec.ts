@@ -1310,6 +1310,22 @@ describe("webviewMessageHandler - destructiveCommandGuardEnabled", () => {
 	})
 })
 
+describe("webviewMessageHandler - requirePlanApproval", () => {
+	beforeEach(() => {
+		vi.clearAllMocks()
+	})
+
+	it("persists the plan approval setting through the generic update path", async () => {
+		await webviewMessageHandler(mockClineProvider, {
+			type: "updateSettings",
+			updatedSettings: { requirePlanApproval: false },
+		})
+
+		expect(mockClineProvider.contextProxy.setValue).toHaveBeenCalledWith("requirePlanApproval", false)
+		expect(mockClineProvider.postStateToWebview).toHaveBeenCalledTimes(1)
+	})
+})
+
 // Both allowlists are normalized by the same branch, so both are held to the
 // same contract.
 describe.each(["allowedReadFiles", "allowedWriteFiles"] as const)("webviewMessageHandler - %s", (key) => {

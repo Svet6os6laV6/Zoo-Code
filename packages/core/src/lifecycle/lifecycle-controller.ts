@@ -241,6 +241,19 @@ export class LifecycleController {
 		return decision
 	}
 
+	/**
+	 * The plan-approval gate decision.
+	 *
+	 * Shared by the Architect stage outcome and the state-only `ANALYSIS` path so
+	 * both routes produce an identical decision: stop at `PLAN_READY` when the gate
+	 * is on, otherwise open the implementation queue directly.
+	 */
+	private planApprovalGate(requirePlanApproval: boolean): LifecycleResult {
+		return requirePlanApproval
+			? { type: "stop", status: "PLAN_READY", reason: "plan-approval" }
+			: { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
+	}
+
 	private decideFromState(
 		state: TaskState,
 		artifacts: LifecycleResolveInput["artifacts"],
@@ -266,9 +279,7 @@ export class LifecycleController {
 				// The plan is complete, but the gate may require a human approval before
 				// the implementation queue opens — the same stop the Architect stage
 				// outcome produces, reached here from the state alone.
-				return requirePlanApproval
-					? { type: "stop", status: "PLAN_READY", reason: "plan-approval" }
-					: { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
+				return this.planApprovalGate(requirePlanApproval)
 			}
 
 			case "PLAN_READY":
@@ -318,9 +329,7 @@ export class LifecycleController {
 
 				// A finished analysis either opens the implementation queue directly or,
 				// when the gate is on, stops for a human plan approval first.
-				return requirePlanApproval
-					? { type: "stop", status: "PLAN_READY", reason: "plan-approval" }
-					: { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
+				return this.planApprovalGate(requirePlanApproval)
 
 			case "code":
 				// The assigned unit is no longer runnable because an internal,

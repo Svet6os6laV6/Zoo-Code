@@ -47,6 +47,7 @@ import {
 	DEFAULT_WRITE_DELAY_MS,
 	DEFAULT_DIFF_FUZZY_THRESHOLD,
 	DEFAULT_DESTRUCTIVE_COMMAND_GUARD_ENABLED,
+	DEFAULT_REQUIRE_PLAN_APPROVAL,
 	DEFAULT_AUTO_CLOSE_ZOO_OPENED_FILES,
 	DEFAULT_AUTO_CLOSE_ZOO_OPENED_FILES_AFTER_USER_EDITED,
 	DEFAULT_AUTO_CLOSE_ZOO_OPENED_NEW_FILES,
@@ -74,6 +75,7 @@ import {
 	TaskStateResolver,
 	harnessLogger,
 	type HarnessLogContextInput,
+	type ModeRunResult,
 	type TaskState,
 } from "@roo-code/core"
 
@@ -2720,6 +2722,7 @@ export class ClineProvider
 			allowedWriteFiles,
 			alwaysAllowExecute,
 			destructiveCommandGuardEnabled,
+			requirePlanApproval,
 			allowedCommands,
 			deniedCommands,
 			alwaysAllowMcp,
@@ -2880,6 +2883,7 @@ export class ClineProvider
 			allowedWriteFiles: allowedWriteFiles ?? [],
 			alwaysAllowExecute: alwaysAllowExecute ?? false,
 			destructiveCommandGuardEnabled,
+			requirePlanApproval,
 			alwaysAllowMcp: alwaysAllowMcp ?? false,
 			alwaysAllowModeSwitch: alwaysAllowModeSwitch ?? false,
 			alwaysAllowSubtasks: alwaysAllowSubtasks ?? false,
@@ -3120,6 +3124,7 @@ export class ClineProvider
 			alwaysAllowExecute: stateValues.alwaysAllowExecute ?? false,
 			destructiveCommandGuardEnabled:
 				stateValues.destructiveCommandGuardEnabled ?? DEFAULT_DESTRUCTIVE_COMMAND_GUARD_ENABLED,
+			requirePlanApproval: stateValues.requirePlanApproval ?? DEFAULT_REQUIRE_PLAN_APPROVAL,
 			alwaysAllowMcp: stateValues.alwaysAllowMcp ?? false,
 			alwaysAllowModeSwitch: stateValues.alwaysAllowModeSwitch ?? false,
 			alwaysAllowSubtasks: stateValues.alwaysAllowSubtasks ?? false,
@@ -4230,6 +4235,17 @@ export class ClineProvider
 	}
 
 	/**
+	 * Whether a completed analysis must stop at `PLAN_READY` for user approval.
+	 *
+	 * The single source of the default is `DEFAULT_REQUIRE_PLAN_APPROVAL`; the
+	 * harness forwards the resolved value to the controller so `packages/core`
+	 * never reads the user setting itself.
+	 */
+	private requirePlanApproval(): boolean {
+		return this.getValue("requirePlanApproval") ?? DEFAULT_REQUIRE_PLAN_APPROVAL
+	}
+
+	/**
 	 * Advance the lifecycle of `task` programmatically (harness-owned).
 	 *
 	 * The continuous-chain entry point. It is called from three places: a lifecycle
@@ -4278,8 +4294,21 @@ export class ClineProvider
 			}
 
 			const runner = this.harnessModeRunner(task.taskId)
+			const requirePlanApproval = this.requirePlanApproval()
 			const result =
-				resultText === undefined ? await runner.continue(task) : await runner.run(task, mode, resultText)
+				resultText === undefined
+					? await runner.continue(task, { requirePlanApproval })
+					: await runner.run(task, mode, resultText, { requirePlanApproval })
+
+			// The task stopped to let the user review and edit the plan. Surface the
+			// harness-owned approve action so the chain does not look stalled; the
+			// `PLAN_READY` write was already applied by the runner.
+			if (result?.type === "stopped" && result.status === "PLAN_READY") {
+				await vscode.window.showInformationMessage(
+					`Task ${task.taskId} is waiting for plan approval. Review the plan artifacts, ` +
+						`then run "Approve Plan" (zoo-code.approvePlan) to start implementation.`,
+				)
+			}
 
 			return result !== null
 		} catch (error) {
@@ -4327,6 +4356,59 @@ export class ClineProvider
 	}
 
 	/**
+	 * Shared lead-in for the harness-owned lifecycle gates.
+	 *
+	 * Both the `BLOCKED` → resume path and the `PLAN_READY` → approve path must
+	 * resolve the current task's canonical state, require the expected status, and
+	 * ask the user to confirm the action. Only this flow is shared — each gate keeps
+	 * its own wording through the message builders.
+	 *
+	 * Returns `null` when there is no current task, the state cannot be resolved,
+	 * the task is not in `requiredStatus`, or the user declines; the caller then
+	 * leaves the task unchanged instead of writing state.
+	 */
+	private async confirmLifecycleAction(options: {
+		readonly logPrefix: string
+		readonly noTaskMessage: string
+		readonly requiredStatus: TaskState["status"]
+		readonly notReadyMessage: (state: TaskState) => string
+		readonly confirmMessage: (state: TaskState) => string
+		readonly confirmLabel: string
+	}): Promise<{ task: Task; state: TaskState } | null> {
+		const task = this.getCurrentTask()
+		if (!task) {
+			await vscode.window.showInformationMessage(options.noTaskMessage)
+			return null
+		}
+
+		let state: TaskState
+		try {
+			state = await new TaskStateResolver().resolve(await task.getTaskContext())
+		} catch (error) {
+			this.log(
+				`${options.logPrefix} Could not resolve the task state: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+			await vscode.window.showErrorMessage("Could not read the task lifecycle state.")
+			return null
+		}
+
+		if (state.status !== options.requiredStatus) {
+			await vscode.window.showInformationMessage(options.notReadyMessage(state))
+			return null
+		}
+
+		const confirmation = await vscode.window.showWarningMessage(
+			options.confirmMessage(state),
+			{ modal: true },
+			options.confirmLabel,
+		)
+
+		return confirmation === options.confirmLabel ? { task, state } : null
+	}
+
+	/**
 	 * Resume the current task when it stopped at `Status: BLOCKED`.
 	 *
 	 * `BLOCKED` is not routable from a stage outcome, so this harness-owned action
@@ -4336,53 +4418,78 @@ export class ClineProvider
 	 * clears the failure tracking, recomputes the DAG and starts the next stage.
 	 */
 	public async resumeBlockedTask(): Promise<void> {
-		const task = this.getCurrentTask()
-		if (!task) {
-			await vscode.window.showInformationMessage("No active task to resume.")
-			return
-		}
-
-		let state: TaskState
-		try {
-			state = await new TaskStateResolver().resolve(await task.getTaskContext())
-		} catch (error) {
-			this.log(
-				`[resumeBlockedTask] Could not resolve the task state: ${error instanceof Error ? error.message : String(error)}`,
-			)
-			await vscode.window.showErrorMessage("Could not read the task lifecycle state.")
-			return
-		}
-
-		if (state.status !== "BLOCKED") {
-			await vscode.window.showInformationMessage(
+		const gate = await this.confirmLifecycleAction({
+			logPrefix: "[resumeBlockedTask]",
+			noTaskMessage: "No active task to resume.",
+			requiredStatus: "BLOCKED",
+			notReadyMessage: (state) =>
 				`Task ${state.taskId} is not blocked (status: ${state.status}); nothing to resume.`,
-			)
-			return
-		}
-
-		const confirmation = await vscode.window.showWarningMessage(
-			`Resume task ${state.taskId}? Confirm that the recorded Unblock Condition is met ` +
+			confirmMessage: (state) =>
+				`Resume task ${state.taskId}? Confirm that the recorded Unblock Condition is met ` +
 				`(see handoff.md and the stage artifact). The harness will clear BLOCKED, ` +
 				`recompute the implementation DAG and start the next stage.`,
-			{ modal: true },
-			"Resume",
-		)
-		if (confirmation !== "Resume") {
+			confirmLabel: "Resume",
+		})
+		if (!gate) {
 			return
 		}
 
 		try {
-			const result = await this.harnessModeRunner(task.taskId).resume(task, true)
+			const result = await this.harnessModeRunner(gate.task.taskId).resume(gate.task, true)
 
 			if (!result) {
 				await vscode.window.showWarningMessage(
-					`Task ${state.taskId} could not be resumed; the harness left it unchanged.`,
+					`Task ${gate.state.taskId} could not be resumed; the harness left it unchanged.`,
 				)
 			}
 		} catch (error) {
 			this.log(`[resumeBlockedTask] Resume failed: ${error instanceof Error ? error.message : String(error)}`)
 			await vscode.window.showErrorMessage(
-				`Failed to resume task ${state.taskId}: ${error instanceof Error ? error.message : String(error)}`,
+				`Failed to resume task ${gate.state.taskId}: ${error instanceof Error ? error.message : String(error)}`,
+			)
+		}
+	}
+
+	/**
+	 * Approve the plan of the current task when it stopped at `Status: PLAN_READY`.
+	 *
+	 * `PLAN_READY` is harness-owned: no stage outcome leaves it, so this action —
+	 * mirroring `resumeBlockedTask` for `BLOCKED` — is the only way forward. The
+	 * user confirms after editing the plan artifacts; `HarnessModeRunner.approvePlan`
+	 * then re-reads the DAG from disk, assigns the first ready unit and starts Code
+	 * (or Refactor when every unit is done).
+	 */
+	public async approvePlanTask(): Promise<void> {
+		const gate = await this.confirmLifecycleAction({
+			logPrefix: "[approvePlanTask]",
+			noTaskMessage: "No active task to approve.",
+			requiredStatus: "PLAN_READY",
+			notReadyMessage: (state) =>
+				`Task ${state.taskId} is not waiting for plan approval (status: ${state.status}); nothing to approve.`,
+			confirmMessage: (state) =>
+				`Approve the plan for task ${state.taskId} and start implementation? ` +
+				`You can still edit the plan artifacts before confirming. The harness will recompute ` +
+				`the implementation DAG and start the first ready unit.`,
+			confirmLabel: "Approve",
+		})
+		if (!gate) {
+			return
+		}
+
+		try {
+			const result = await this.harnessModeRunner(gate.task.taskId).approvePlan(gate.task)
+
+			if (!result) {
+				await vscode.window.showWarningMessage(
+					`Task ${gate.state.taskId} could not be approved; the harness left it unchanged.`,
+				)
+			}
+		} catch (error) {
+			this.log(`[approvePlanTask] Approval failed: ${error instanceof Error ? error.message : String(error)}`)
+			await vscode.window.showErrorMessage(
+				`Failed to approve the plan for task ${gate.state.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
 			)
 		}
 	}
@@ -4652,6 +4759,7 @@ export class ClineProvider
 
 				if (childHistory?.mode) {
 					try {
+						const requirePlanApproval = this.requirePlanApproval()
 						const lifecycleResult = await new HarnessModeRunner(async (mode, message) => {
 							const { customModes } = await this.getState()
 							if (!getModeBySlug(mode, customModes)) {
@@ -4664,7 +4772,7 @@ export class ClineProvider
 								initialTodos: [],
 								mode,
 							})
-						}).run(parentInstance, childHistory.mode, completionResultSummary)
+						}).run(parentInstance, childHistory.mode, completionResultSummary, { requirePlanApproval })
 
 						if (lifecycleResult) {
 							this.cancelledDelegationChildIds.delete(childTaskId)

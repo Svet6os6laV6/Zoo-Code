@@ -5,6 +5,7 @@ import { type Task } from "../../core/task/Task"
 type ProviderStubFields = {
 	cancelledDelegationChildIds?: Set<string>
 	log?: ReturnType<typeof vi.fn>
+	getValue?: ReturnType<typeof vi.fn>
 	taskHistoryStore?: { get: (id: string) => unknown; invalidate?: (id: string) => Promise<void> }
 	taskScheduler?: { schedule: (task: Task, run: () => Promise<void>) => Promise<void> }
 	taskRegistry?: TaskRegistry
@@ -13,12 +14,14 @@ type ProviderStubFields = {
 	runDelegationTransition?: unknown
 	removeClineFromStack?: unknown
 	evictCurrentTask?: unknown
+	requirePlanApproval?: unknown
 }
 
 type PrivateProviderMethods = {
 	runDelegationTransition: (this: unknown, ...args: unknown[]) => unknown
 	removeClineFromStack: (this: unknown, ...args: unknown[]) => unknown
 	evictCurrentTask: (this: unknown, ...args: unknown[]) => unknown
+	requirePlanApproval: (this: unknown) => boolean
 }
 
 /**
@@ -36,6 +39,9 @@ export function makeProviderStub<T extends object>(stub: T): ClineProvider {
 	const proto = ClineProvider.prototype as unknown as PrivateProviderMethods
 	s.cancelledDelegationChildIds ??= new Set()
 	s.log ??= vi.fn()
+	// The lifecycle reads the `requirePlanApproval` setting through `getValue`;
+	// default it to the persisted default so provider paths stay deterministic.
+	s.getValue ??= vi.fn(() => true)
 	s.taskHistoryStore ??= { get: () => undefined }
 	s.taskHistoryStore.invalidate ??= async () => {}
 	s.taskScheduler ??= { schedule: async (_task, run) => run() }
@@ -52,5 +58,8 @@ export function makeProviderStub<T extends object>(stub: T): ClineProvider {
 	s.runDelegationTransition ??= proto.runDelegationTransition.bind(s)
 	s.removeClineFromStack ??= proto.removeClineFromStack.bind(s)
 	s.evictCurrentTask ??= proto.evictCurrentTask.bind(s)
+	// The plain stub has no `ClineProvider` prototype, so the private lifecycle
+	// helper must be bound explicitly to read `getValue` from `this`.
+	s.requirePlanApproval ??= proto.requirePlanApproval.bind(s)
 	return s as unknown as ClineProvider
 }

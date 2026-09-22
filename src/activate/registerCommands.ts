@@ -245,6 +245,19 @@ const getCommandsMap = ({
 			outputChannel.appendLine(`[continueTaskLifecycle] failed: ${error}`)
 		}
 	},
+	approvePlan: async () => {
+		const visibleProvider = getVisibleProviderOrLog(outputChannel)
+
+		if (!visibleProvider) {
+			return
+		}
+
+		try {
+			await visibleProvider.approvePlanTask()
+		} catch (error) {
+			outputChannel.appendLine(`[approvePlan] failed: ${error}`)
+		}
+	},
 })
 
 export const openClineInNewTab = async ({ context, outputChannel }: Omit<RegisterCommandOptions, "provider">) => {

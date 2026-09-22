@@ -133,7 +133,7 @@ describe("getVisibleProviderOrLog", () => {
 describe("registerCommands handlers", () => {
 	let mockOutputChannel: vscode.OutputChannel
 	let mockContext: vscode.ExtensionContext
-	let mockVisibleProvider: { postMessageToWebview: Mock; resumeBlockedTask: Mock }
+	let mockVisibleProvider: { postMessageToWebview: Mock; resumeBlockedTask: Mock; approvePlanTask: Mock }
 	let mockProvider: { postMessageToWebview: Mock }
 	let handlers: Record<string, (...args: unknown[]) => unknown>
 
@@ -159,6 +159,7 @@ describe("registerCommands handlers", () => {
 		mockVisibleProvider = {
 			postMessageToWebview: vi.fn().mockResolvedValue(undefined),
 			resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
+			approvePlanTask: vi.fn().mockResolvedValue(undefined),
 		}
 
 		mockProvider = {
@@ -397,6 +398,29 @@ describe("registerCommands handlers", () => {
 		await handlers["zoo-code.resumeBlockedTask"]()
 
 		expect(mockVisibleProvider.resumeBlockedTask).not.toHaveBeenCalled()
+	})
+
+	it("approvePlan delegates to the visible provider", async () => {
+		await handlers["zoo-code.approvePlan"]()
+
+		expect(mockVisibleProvider.approvePlanTask).toHaveBeenCalledTimes(1)
+	})
+
+	it("approvePlan logs to outputChannel when the provider throws", async () => {
+		const boom = new Error("approve failed")
+		mockVisibleProvider.approvePlanTask.mockRejectedValue(boom)
+
+		await handlers["zoo-code.approvePlan"]()
+
+		expect(mockOutputChannel.appendLine).toHaveBeenCalledWith(`[approvePlan] failed: ${boom}`)
+	})
+
+	it("approvePlan is a no-op when no visible provider", async () => {
+		;(ClineProvider.getVisibleInstance as Mock).mockReturnValue(undefined)
+
+		await handlers["zoo-code.approvePlan"]()
+
+		expect(mockVisibleProvider.approvePlanTask).not.toHaveBeenCalled()
 	})
 })
 

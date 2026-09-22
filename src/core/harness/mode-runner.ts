@@ -18,7 +18,7 @@ type LifecycleTask = {
 
 type HarnessModeRunnerDependencies = {
 	readonly stateResolver?: Pick<TaskStateResolver, "resolve">
-	readonly controller?: Pick<LifecycleController, "transition" | "resume" | "resolve">
+	readonly controller?: Pick<LifecycleController, "transition" | "resume" | "resolve" | "approvePlan">
 	readonly modeRunner?: Pick<ModeRunner, "run">
 	readonly parser?: Pick<TxxParser, "read">
 	readonly validator?: Pick<ArtifactValidator, "validate">
@@ -26,7 +26,7 @@ type HarnessModeRunnerDependencies = {
 
 export class HarnessModeRunner {
 	private readonly stateResolver: Pick<TaskStateResolver, "resolve">
-	private readonly controller: Pick<LifecycleController, "transition" | "resume" | "resolve">
+	private readonly controller: Pick<LifecycleController, "transition" | "resume" | "resolve" | "approvePlan">
 	private readonly modeRunner: Pick<ModeRunner, "run">
 	private readonly parser: Pick<TxxParser, "read">
 	private readonly validator: Pick<ArtifactValidator, "validate">
@@ -42,7 +42,19 @@ export class HarnessModeRunner {
 		this.validator = dependencies.validator ?? new ArtifactValidator()
 	}
 
-	async run(task: LifecycleTask, runtimeMode: string, resultText: string): Promise<ModeRunResult | null> {
+	/**
+	 * Advance the lifecycle after a stage reported its result.
+	 *
+	 * `options.requirePlanApproval` is resolved by the caller from the user
+	 * setting and forwarded verbatim: the runner is an adapter and never reads
+	 * settings itself, so the controller's decision stays explicit and pure.
+	 */
+	async run(
+		task: LifecycleTask,
+		runtimeMode: string,
+		resultText: string,
+		options: { requirePlanApproval?: boolean } = {},
+	): Promise<ModeRunResult | null> {
 		const outcome = parseStageOutcome(runtimeMode, resultText)
 		if (!outcome) {
 			return null
@@ -51,7 +63,7 @@ export class HarnessModeRunner {
 		const context = await task.getTaskContext()
 		const state = await this.stateResolver.resolve(context)
 
-		return this.applyDecision(context, state, this.controller.transition(state, outcome))
+		return this.applyDecision(context, state, this.controller.transition(state, outcome, options))
 	}
 
 	/**
@@ -70,6 +82,22 @@ export class HarnessModeRunner {
 	}
 
 	/**
+	 * Approve the plan of a task stopped at `PLAN_READY` (harness-owned).
+	 *
+	 * Mirrors `resume`: the caller has already obtained the user's approval — the
+	 * explicit signal the lifecycle contract requires — and the controller decides
+	 * whether the state is actually approvable. Returns `null` when the approval is
+	 * not routable (the task is not at `PLAN_READY`), so the caller leaves the task
+	 * unchanged instead of writing state.
+	 */
+	async approvePlan(task: LifecycleTask): Promise<ModeRunResult | null> {
+		const context = await task.getTaskContext()
+		const state = await this.stateResolver.resolve(context)
+
+		return this.applyDecision(context, state, this.controller.approvePlan(state))
+	}
+
+	/**
 	 * Advance the lifecycle from the current canonical state without a stage
 	 * outcome.
 	 *
@@ -84,13 +112,25 @@ export class HarnessModeRunner {
 	 * state, no ready unit exists, or the state is terminal), so the caller keeps
 	 * whatever path it had instead of writing state.
 	 */
-	async continue(task: LifecycleTask): Promise<ModeRunResult | null> {
+	async continue(
+		task: LifecycleTask,
+		options: { requirePlanApproval?: boolean } = {},
+	): Promise<ModeRunResult | null> {
 		const context = await task.getTaskContext()
 		const state = await this.stateResolver.resolve(context)
 		const artifacts = await this.parser.read(context)
 		const report = await this.validator.validate(context, { status: state.status }, artifacts)
 
-		return this.applyDecision(context, state, this.controller.resolve({ state, artifacts, report }))
+		return this.applyDecision(
+			context,
+			state,
+			this.controller.resolve({
+				state,
+				artifacts,
+				report,
+				requirePlanApproval: options.requirePlanApproval,
+			}),
+		)
 	}
 
 	/**
