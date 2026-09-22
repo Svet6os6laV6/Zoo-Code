@@ -115,12 +115,19 @@ export class LifecycleController {
 	 * the harness will write — it is validated against the canonical status machine
 	 * here, so nothing outside this table is ever persisted.
 	 */
-	transition(state: TaskState, outcome: StageOutcome): LifecycleResult {
+	transition(
+		state: TaskState,
+		outcome: StageOutcome,
+		options: { readonly requirePlanApproval?: boolean } = {},
+	): LifecycleResult {
 		if (!MODE_STATUSES[outcome.mode].some((status) => status === state.status)) {
 			return invalid(`Mode ${outcome.mode} cannot complete lifecycle status ${state.status}`)
 		}
 
-		const decision = this.decide(state, outcome)
+		// The approval gate is an explicit input, not a setting the controller reads:
+		// packages/core stays pure and the integration owns the user preference. Only
+		// the Architect stage consults it; every other mode ignores the option.
+		const decision = this.decide(state, outcome, options.requirePlanApproval ?? true)
 
 		// Only statuses the harness writes itself are validated here.
 		// `schedule_implementation` defers the write to TaskScheduler, which owns its
@@ -172,6 +179,32 @@ export class LifecycleController {
 	}
 
 	/**
+	 * Approve the plan and open the implementation queue.
+	 *
+	 * `PLAN_READY` is not routable from a stage outcome — no mode runs while the
+	 * task waits for approval — so the harness owns this action, mirroring `resume`
+	 * for `BLOCKED`. The caller has already obtained the user's approval; `ModeRunner`
+	 * writes the status and `TaskScheduler` assigns the first ready unit.
+	 *
+	 * Pure and side-effect free, like `transition` and `resume`.
+	 */
+	approvePlan(state: TaskState): LifecycleResult {
+		if (state.status !== "PLAN_READY") {
+			return invalid(`Plan approval is only valid from PLAN_READY, got ${state.status}`)
+		}
+
+		// Reuse the same canonical-transition guard `resume` relies on, so the status
+		// the runner writes cannot drift from the README machine.
+		if (!isTaskStatusTransition("PLAN_READY", "READY_FOR_IMPLEMENTATION")) {
+			return invalid(
+				"Status transition PLAN_READY -> READY_FOR_IMPLEMENTATION is not a canonical task status transition",
+			)
+		}
+
+		return { type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" }
+	}
+
+	/**
 	 * Decide whether the lifecycle may advance from the current canonical state
 	 * alone, without a stage outcome.
 	 *
@@ -187,8 +220,8 @@ export class LifecycleController {
 	 * status machine here, so nothing outside this table is ever persisted.
 	 */
 	resolve(input: LifecycleResolveInput): LifecycleResult {
-		const { state, artifacts, report } = input
-		const decision = this.decideFromState(state, artifacts, report)
+		const { state, artifacts, report, requirePlanApproval = true } = input
+		const decision = this.decideFromState(state, artifacts, report, requirePlanApproval)
 
 		// `schedule_implementation` defers the write to TaskScheduler, which owns its
 		// own preconditions and re-derives the canonical status from the DAG.
@@ -212,6 +245,7 @@ export class LifecycleController {
 		state: TaskState,
 		artifacts: LifecycleResolveInput["artifacts"],
 		report: LifecycleResolveInput["report"],
+		requirePlanApproval: boolean,
 	): LifecycleResult {
 		switch (state.status) {
 			case "ANALYSIS": {
@@ -224,10 +258,21 @@ export class LifecycleController {
 						issue.code === "missing-implementation-directory",
 				)
 
-				return report.valid && !blocking && artifacts.tasks.length > 0
-					? { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
-					: invalid("analysis artifacts are not ready; the architect stage must run")
+				const ready = report.valid && !blocking && artifacts.tasks.length > 0
+				if (!ready) {
+					return invalid("analysis artifacts are not ready; the architect stage must run")
+				}
+
+				// The plan is complete, but the gate may require a human approval before
+				// the implementation queue opens — the same stop the Architect stage
+				// outcome produces, reached here from the state alone.
+				return requirePlanApproval
+					? { type: "stop", status: "PLAN_READY", reason: "plan-approval" }
+					: { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
 			}
+
+			case "PLAN_READY":
+				return invalid("plan approval is a harness-owned action")
 
 			case "READY_FOR_IMPLEMENTATION":
 			case "IMPLEMENTATION":
@@ -260,16 +305,22 @@ export class LifecycleController {
 		}
 	}
 
-	private decide(state: TaskState, outcome: StageOutcome): LifecycleResult {
+	private decide(state: TaskState, outcome: StageOutcome, requirePlanApproval: boolean): LifecycleResult {
 		if (outcome.result === "BLOCKED") {
 			return { type: "stop", status: "BLOCKED", reason: "blocked" }
 		}
 
 		switch (outcome.mode) {
 			case "architect":
-				return outcome.result === "COMPLETED"
-					? { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
-					: unsupported(outcome.mode, outcome.result)
+				if (outcome.result !== "COMPLETED") {
+					return unsupported(outcome.mode, outcome.result)
+				}
+
+				// A finished analysis either opens the implementation queue directly or,
+				// when the gate is on, stops for a human plan approval first.
+				return requirePlanApproval
+					? { type: "stop", status: "PLAN_READY", reason: "plan-approval" }
+					: { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }
 
 			case "code":
 				// The assigned unit is no longer runnable because an internal,

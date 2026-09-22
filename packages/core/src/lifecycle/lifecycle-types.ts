@@ -109,7 +109,7 @@ export type LifecycleResult =
 	| {
 			readonly type: "stop"
 			readonly status: TaskStatus
-			readonly reason: "done" | "pending" | "blocked" | "max-attempts"
+			readonly reason: "done" | "pending" | "blocked" | "max-attempts" | "plan-approval"
 			/** Present when a max-attempts stop must surface the exhausted finding. */
 			readonly failure?: FailureTracking
 	  }
@@ -127,6 +127,15 @@ export type LifecycleResolveInput = {
 	readonly state: TaskState
 	readonly artifacts: ImplementationArtifacts
 	readonly report: ArtifactValidationReport
+	/**
+	 * Whether a completed analysis must stop at the `PLAN_READY` approval gate
+	 * before implementation may start. Defaults to `true` when omitted.
+	 *
+	 * The controller stays pure: it never reads a user setting itself. The
+	 * integration resolves the setting and passes it explicitly, exactly like
+	 * `unblockConditionMet` in `resume`.
+	 */
+	readonly requirePlanApproval?: boolean
 }
 
 export type ModeRunResult =
@@ -134,7 +143,7 @@ export type ModeRunResult =
 	| {
 			readonly type: "stopped"
 			readonly status: TaskStatus
-			readonly reason: "done" | "pending" | "blocked" | "max-attempts"
+			readonly reason: "done" | "pending" | "blocked" | "max-attempts" | "plan-approval"
 	  }
 	| { readonly type: "invalid"; readonly reason: string }
 

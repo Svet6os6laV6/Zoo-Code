@@ -160,6 +160,21 @@ Current Task: NONE
 		expect(isTaskStatusTransition(current, next)).toBe(true)
 	})
 
+	it.each([
+		["ANALYSIS", "PLAN_READY"],
+		["PLAN_READY", "READY_FOR_IMPLEMENTATION"],
+	] as const)("accepts the %s -> %s approval-gate edge", (current, next) => {
+		expect(TaskStateResolver.transition(current, next)).toBe(next)
+		expect(isTaskStatusTransition(current, next)).toBe(true)
+	})
+
+	it("rejects every outgoing edge from PLAN_READY except the approval edge", () => {
+		// No stage outcome leaves the gate: `approvePlan` is the only way out.
+		expect(isTaskStatusTransition("PLAN_READY", "IMPLEMENTATION")).toBe(false)
+		expect(isTaskStatusTransition("PLAN_READY", "BLOCKED")).toBe(false)
+		expect(isTaskStatusTransition("PLAN_READY", "ANALYSIS")).toBe(false)
+	})
+
 	it("reports a rejected edge without throwing", () => {
 		expect(isTaskStatusTransition("DONE", "IMPLEMENTATION")).toBe(false)
 	})
