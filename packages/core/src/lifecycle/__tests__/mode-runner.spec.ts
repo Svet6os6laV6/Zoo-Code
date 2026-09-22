@@ -344,6 +344,83 @@ describe("ModeRunner", () => {
 		expect(starts).toEqual(["refactor"])
 	})
 
+	it("writes the PLAN_READY gate without starting a mode", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: ANALYSIS\nCurrent Task: NONE\n",
+		})
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("ANALYSIS"), {
+			type: "stop",
+			status: "PLAN_READY",
+			reason: "plan-approval",
+		})
+
+		expect(result).toEqual({ type: "stopped", status: "PLAN_READY", reason: "plan-approval" })
+		expect(starts).toEqual([])
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Status: PLAN_READY")
+		expect(readme).toContain("Current Task: NONE")
+	})
+
+	it("opens the implementation queue on plan approval and starts Code on the first ready unit", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: PLAN_READY\nCurrent Task: NONE\n",
+			[path.join(implementation, "T01-unit.md")]: "## Status\nStatus: TODO\n",
+		})
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("PLAN_READY"), {
+			type: "resume_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+		expect(starts).toEqual(["code"])
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Status: IMPLEMENTATION")
+		expect(readme).toContain("Current Task: implementation/T01-unit.md")
+	})
+
+	it("starts Refactor on plan approval when every implementation unit is already done", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: PLAN_READY\nCurrent Task: NONE\n",
+			[path.join(implementation, "T01-unit.md")]: "## Status\nStatus: DONE\n",
+		})
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const result = await runner.run(context, state("PLAN_READY"), {
+			type: "resume_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+
+		expect(result).toEqual({ type: "started", mode: "refactor", status: "READY_FOR_REFACTOR" })
+		expect(starts).toEqual(["refactor"])
+	})
+
 	it("resumes a BLOCKED task, clears the blocker and assigns the next ready unit", async () => {
 		const fileSystem = createInMemoryFileSystem({
 			[readmePath]:

@@ -29,7 +29,9 @@ function state(status: TaskState["status"], overrides: Partial<TaskState> = {}):
 
 describe("LifecycleController", () => {
 	it.each([
-		["ANALYSIS", "architect", "COMPLETED", { type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" }],
+		// The default gate stops a completed analysis at the approval gate instead of
+		// handing straight to Code.
+		["ANALYSIS", "architect", "COMPLETED", { type: "stop", status: "PLAN_READY", reason: "plan-approval" }],
 		[
 			"IMPLEMENTATION",
 			"code",
@@ -76,6 +78,28 @@ describe("LifecycleController", () => {
 		const decision = controller.transition(state(status), { mode, result, failureKey: null })
 
 		expect(decision).toEqual(expected)
+	})
+
+	it("schedules implementation from a completed analysis when the approval gate is off", () => {
+		const decision = controller.transition(
+			state("ANALYSIS"),
+			{ mode: "architect", result: "COMPLETED", failureKey: null },
+			{ requirePlanApproval: false },
+		)
+
+		expect(decision).toEqual({ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" })
+	})
+
+	it("ignores the approval gate for every mode but architect", () => {
+		// A fix pass or an implementation unit is not the plan stage, so the gate
+		// must not alter their routing.
+		const decision = controller.transition(
+			state("IMPLEMENTATION"),
+			{ mode: "code", result: "COMPLETED", failureKey: null },
+			{ requirePlanApproval: true },
+		)
+
+		expect(decision).toEqual({ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" })
 	})
 
 	it.each([
@@ -284,6 +308,24 @@ describe("LifecycleController", () => {
 			reason: "Resume is only valid from BLOCKED, got IMPLEMENTATION",
 		})
 	})
+
+	it("approves a plan at PLAN_READY and reopens the implementation queue", () => {
+		const decision = controller.approvePlan(state("PLAN_READY"))
+
+		expect(decision).toEqual({ type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" })
+		// The approval edge is canonical, so the status the runner writes is reachable.
+		expect(isTaskStatusTransition("PLAN_READY", "READY_FOR_IMPLEMENTATION")).toBe(true)
+	})
+
+	it.each(["ANALYSIS", "IMPLEMENTATION", "BLOCKED", "DONE"] as const)(
+		"refuses to approve a plan from %s",
+		(status) => {
+			expect(controller.approvePlan(state(status))).toEqual({
+				type: "invalid",
+				reason: `Plan approval is only valid from PLAN_READY, got ${status}`,
+			})
+		},
+	)
 })
 
 function artifacts(taskCount: number): ImplementationArtifacts {
@@ -322,11 +364,22 @@ function issue(
 }
 
 describe("LifecycleController.resolve", () => {
-	it("advances ANALYSIS to implementation when the analysis artifacts are ready", () => {
+	it("stops at PLAN_READY when the analysis artifacts are ready and the gate is on", () => {
 		const decision = controller.resolve({
 			state: state("ANALYSIS"),
 			artifacts: artifacts(2),
 			report: validationReport(),
+		})
+
+		expect(decision).toEqual({ type: "stop", status: "PLAN_READY", reason: "plan-approval" })
+	})
+
+	it("advances ANALYSIS to implementation when the gate is off", () => {
+		const decision = controller.resolve({
+			state: state("ANALYSIS"),
+			artifacts: artifacts(2),
+			report: validationReport(),
+			requirePlanApproval: false,
 		})
 
 		expect(decision).toEqual({ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" })
@@ -408,6 +461,15 @@ describe("LifecycleController.resolve", () => {
 		).toEqual({
 			type: "invalid",
 			reason: "task is blocked; resume is a harness-owned action",
+		})
+	})
+
+	it("leaves a PLAN_READY task to the harness-owned approval action", () => {
+		expect(
+			controller.resolve({ state: state("PLAN_READY"), artifacts: artifacts(2), report: validationReport() }),
+		).toEqual({
+			type: "invalid",
+			reason: "plan approval is a harness-owned action",
 		})
 	})
 

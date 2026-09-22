@@ -9,6 +9,7 @@ import type { TaskContext } from "./task-resolver.js"
 
 export const TASK_STATUSES = [
 	"ANALYSIS",
+	"PLAN_READY",
 	"READY_FOR_IMPLEMENTATION",
 	"IMPLEMENTATION",
 	"READY_FOR_REFACTOR",
@@ -54,7 +55,16 @@ type TaskStateFileSystem = {
  * `REVIEW_PASSED`) so that stage re-verifies the fix.
  */
 export const TASK_STATUS_TRANSITIONS = {
-	ANALYSIS: ["READY_FOR_IMPLEMENTATION", "IMPLEMENTATION", "BLOCKED"],
+	// `PLAN_READY` is the approval gate between analysis and implementation: when
+	// the plan needs a human confirmation, the completed Architect stage stops here
+	// instead of handing straight to Code. The historical `READY_FOR_IMPLEMENTATION`
+	// and `IMPLEMENTATION` edges are kept so legacy artifacts and the parking paths
+	// keep working when the gate is off.
+	ANALYSIS: ["PLAN_READY", "READY_FOR_IMPLEMENTATION", "IMPLEMENTATION", "BLOCKED"],
+	// No stage outcome leaves `PLAN_READY`: no mode runs in this status, so its only
+	// edge is the harness-owned `approvePlan` action returning to the implementation
+	// queue. `BLOCKED` is deliberately absent — there is nothing to block mid-gate.
+	PLAN_READY: ["READY_FOR_IMPLEMENTATION"],
 	READY_FOR_IMPLEMENTATION: ["IMPLEMENTATION", "BLOCKED"],
 	// `READY_FOR_IMPLEMENTATION` is the parking edge: an assigned unit that turned
 	// out not to be ready (a dependency on another unit was discovered) returns to
