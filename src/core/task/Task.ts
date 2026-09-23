@@ -62,7 +62,11 @@ import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
 import {
 	ArtifactValidator,
+	CanonicalReadmeWriter,
 	diffImplementationArtifacts,
+	LIFECYCLE_MODES,
+	NO_OWNER,
+	readCanonicalFields,
 	StateReconciler,
 	TaskResolver,
 	TaskScheduler,
@@ -70,7 +74,9 @@ import {
 	TaskStateResolver,
 	TxxParser,
 	harnessLogger,
+	isActiveAssignment,
 	type ArtifactValidationIssue,
+	type AssignmentOwnerContext,
 	type HarnessLogContextInput,
 	type HarnessLoggerPort,
 	type ImplementationArtifacts,
@@ -157,7 +163,12 @@ import { mergeConsecutiveApiMessages } from "./mergeConsecutiveApiMessages"
 import { prepareApiConversationMessage } from "./apiConversationHistory"
 import { shouldAddUserMessageToHistory } from "./messageCounting"
 import { type TaskExecutionContext } from "./providerHandoff"
-import { computeArtifactFingerprint } from "../harness/artifact-fingerprint"
+import {
+	computeArtifactFingerprint,
+	computeArtifactStatFingerprint,
+	type ArtifactStatEntry,
+	type ArtifactStatFingerprintInput,
+} from "../harness/artifact-fingerprint"
 
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
@@ -168,6 +179,21 @@ const defaultArtifactValidator = new ArtifactValidator()
 const defaultTaskScheduler = new TaskScheduler()
 const defaultStateReconciler = new StateReconciler()
 const defaultTxxParser = new TxxParser()
+
+/**
+ * Stat a single artifact file for the cheap pre-parse fingerprint.
+ *
+ * Returns `null` on any error (missing file, permission, unsupported stat) so
+ * the caller falls back to the full resolve instead of trusting a partial view.
+ */
+async function statArtifactEntry(filePath: string): Promise<ArtifactStatEntry | null> {
+	try {
+		const stats = await fs.stat(filePath)
+		return { name: path.basename(filePath), mtimeMs: stats.mtimeMs, size: stats.size }
+	} catch {
+		return null
+	}
+}
 
 type QueuedAskResolution = { response: ClineAskResponse; requiresDurableAck: boolean }
 
@@ -582,6 +608,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 * validator, the scheduler, and the reconciler.
 	 */
 	private lastResolveFingerprint?: string
+	/**
+	 * Cheap metadata fingerprint (README stat plus implementation file stats) at
+	 * the last full resolve. Checked before `txxParser.read` so an unchanged
+	 * artifact set skips the parse entirely. `null`/`undefined` means "unknown"
+	 * and always falls back to the full path.
+	 */
+	private lastStatFingerprint?: string | null
 	/** Result of the last full resolve, returned verbatim on a fingerprint hit. */
 	private lastResolvedResult?: { taskState: TaskState; artifactIssues: ArtifactValidationIssue[] }
 	/**
@@ -4391,6 +4424,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			traceId: this.harnessTraceId,
 			taskId: taskContext.taskId,
 			agentTaskId: this.taskId,
+			// The unit in play is the one the last resolve observed, so a tool call
+			// is attributed to the unit that was actually assigned at that moment.
+			// Reading the cache keeps this off the README on every tool call; before
+			// the first resolve (or when no unit is assigned) it is `null`.
+			txxId: this.lastResolvedResult?.taskState.currentTask ?? null,
 			mode: await this.getTaskMode(),
 		}
 	}
@@ -4557,6 +4595,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	): Promise<{ taskState: TaskState; artifactIssues: ArtifactValidationIssue[] }> {
 		const logger = harnessLogger(this.harnessLogger)
 
+		// Cheap pre-check: stat the artifact files before parsing them. The
+		// content fingerprint below can only be computed after every
+		// `implementation/*.md` has been parsed, so it saves the validator and
+		// scheduler work but not the parse itself. When the metadata is unchanged
+		// since the last full resolve, the parse, the validator, the scheduler,
+		// and the reconciler would all reproduce the cached outcome, so the
+		// cached result is returned before the parse.
+		//
+		// `null` means the metadata could not be trusted (missing README,
+		// unreadable directory, missing stat field): the full path runs instead.
+		const statFingerprint = computeArtifactStatFingerprint(await this.readArtifactStatFingerprintInput(taskContext))
+
+		if (statFingerprint !== null && this.lastStatFingerprint === statFingerprint && this.lastResolvedResult) {
+			return this.lastResolvedResult
+		}
+
 		// `implementation/` is read exactly once per resolve. The validator and
 		// the scheduler both consume this snapshot, so a concurrent write cannot
 		// make the validation decision and the assignment decision describe two
@@ -4565,12 +4619,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const readme = await this.readCanonicalReadme(taskContext)
 		const fingerprint = computeArtifactFingerprint({ readme, snapshot })
 
-		// Short-circuit: when neither the canonical README nor the implementation
-		// artifacts changed since the last full resolve, the outcome is
-		// deterministic. Re-running the validator, the scheduler, and the
-		// reconciler would only re-emit the same decision records, so the cached
-		// result is returned as-is.
+		// Second short-circuit: the content is unchanged even though the metadata
+		// moved (for example a `touch`). Refresh the cheap fingerprint so the next
+		// resolve can skip the parse as well, then return the cached result.
 		if (this.lastResolveFingerprint === fingerprint && this.lastResolvedResult) {
+			this.lastStatFingerprint = statFingerprint
 			return this.lastResolvedResult
 		}
 
@@ -4630,7 +4683,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				let assigned = false
 
-				if (report.valid) {
+				// The next unit may only be assigned when *this* task is the chain
+				// owner and the lifecycle stage actually executes implementation units.
+				// A delegated stage-child shares the owner's README, so letting it
+				// assign would write the next unit into the owner's README and inject it
+				// into the child's prompt, leaving the unit assigned with no executor
+				// (F1/F2). Statuses outside IMPLEMENTATION/READY_FOR_IMPLEMENTATION never
+				// produce an assignment, so the scheduler does not emit a repeated
+				// `stage-not-implementation` decision on every turn (R3).
+				const ownsAssignment = !this.parentTaskId
+				const stageAssignsUnits =
+					taskState.status === "IMPLEMENTATION" || taskState.status === "READY_FOR_IMPLEMENTATION"
+
+				if (report.valid && ownsAssignment && stageAssignsUnits) {
 					const assignment = await this.taskScheduler.assignNext(taskContext, taskState, snapshot)
 
 					if (assignment) {
@@ -4638,6 +4703,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						assigned = true
 					}
 				}
+
+				// Keep the canonical `Owner` lease in step with the executor that holds
+				// it. Diagnostic only: a failure here must not change the resolve.
+				const ownerValue = readmeRejected
+					? null
+					: await this.syncAssignmentOwner(taskContext, taskState, snapshot, readme)
+
+				// A resolve that observes a unit being executed is a reconcile trigger
+				// even when nothing was assigned: the assignment may have been written by
+				// another resolve and left without an executor (F8).
+				const activeUnit = taskState.currentTask
+					? snapshot.tasks.find((task) => task.id === taskState.currentTask)
+					: undefined
+				const observesActiveAssignment = isActiveAssignment(
+					taskState.status,
+					taskState.currentTask,
+					activeUnit?.status,
+				)
 
 				span.annotate({
 					status: taskState.status,
@@ -4657,17 +4740,25 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// Cache the outcome against the fingerprint of the inputs it was
 				// derived from, so an unchanged next resolve can skip the work.
 				this.lastResolveFingerprint = fingerprint
+				// The cheap metadata fingerprint is refreshed from the same resolve,
+				// so the next resolve can short-circuit before the parse.
+				this.lastStatFingerprint = statFingerprint
 				this.lastResolvedResult = { taskState, artifactIssues }
 
 				// Diagnostic only: compare the runtime view with the canonical artifacts
 				// after a transition. The reconciler never mutates and never throws.
-				if (assigned || readmeRejected) {
-					const phase = assigned ? "scheduler.assignNext" : "taskState.fallback"
+				if (assigned || readmeRejected || observesActiveAssignment) {
+					const phase = assigned
+						? "scheduler.assignNext"
+						: readmeRejected
+							? "taskState.fallback"
+							: "taskState.observe"
 
 					try {
 						await this.stateReconciler.reconcile(taskContext, taskState, {
 							phase,
 							logger,
+							owner: this.assignmentOwnerContext(ownerValue),
 							context: {
 								taskId: taskContext.taskId,
 								agentTaskId: this.taskId,
@@ -4707,6 +4798,136 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		} catch {
 			return null
 		}
+	}
+
+	/**
+	 * Collect the file metadata the cheap pre-parse fingerprint is built from.
+	 *
+	 * Only the files the parser actually reads are stat'ed: the canonical README
+	 * and the `implementation/*.md` files (both Txx artifacts and the unexpected
+	 * markdown files the validator reports). Non-markdown files are ignored by
+	 * the parser, so they cannot change the resolve outcome.
+	 *
+	 * Fail-safe by construction: a missing README, an unreadable directory, or a
+	 * file whose stat fails yields an input that `computeArtifactStatFingerprint`
+	 * maps to `null`, which the caller treats as "changed" and falls back to the
+	 * full path.
+	 */
+	private async readArtifactStatFingerprintInput(taskContext: TaskContext): Promise<ArtifactStatFingerprintInput> {
+		const readme = await statArtifactEntry(path.join(taskContext.taskRoot, "README.md"))
+		const directory = path.join(taskContext.taskRoot, "implementation")
+
+		let implementation: ArtifactStatEntry[] | null
+		try {
+			const entries = await fs.readdir(directory)
+			const markdownFiles = entries.filter((entry) => entry.endsWith(".md")).sort()
+			implementation = await Promise.all(
+				markdownFiles.map(
+					async (name) =>
+						(await statArtifactEntry(path.join(directory, name))) ?? { name, mtimeMs: null, size: null },
+				),
+			)
+		} catch {
+			implementation = null
+		}
+
+		return { readme, implementation }
+	}
+
+	/**
+	 * Keep the canonical `Owner` lease in step with the executor that holds it.
+	 *
+	 * The lease is diagnostic only: it records which task is running the assigned
+	 * unit so `StateReconciler` can flag an assignment with no active owner. A
+	 * delegated stage-child is leased by the harness when it starts; a root task
+	 * that runs a stage itself (the harness did not delegate) leases itself on its
+	 * first resolve. The lease is released when the unit finishes, but only by the
+	 * task that holds it, so a finishing executor never clears the lease of the
+	 * stage that already replaced it.
+	 *
+	 * Returns the effective canonical `Owner` value, or `null` when the README is
+	 * unreadable. Never throws: a diagnostic must not change the resolve.
+	 */
+	private async syncAssignmentOwner(
+		taskContext: TaskContext,
+		taskState: TaskState,
+		snapshot: ImplementationArtifacts,
+		readme: string | null,
+	): Promise<string | null> {
+		if (readme === null) {
+			return null
+		}
+
+		const currentOwner = readCanonicalFields(readme).owner
+
+		try {
+			const mode = await this.getTaskMode()
+			if (!LIFECYCLE_MODES.some((lifecycleMode) => lifecycleMode === mode)) {
+				return currentOwner
+			}
+
+			const lease = `${mode}#${this.taskId}`
+			const unit = taskState.currentTask
+				? snapshot.tasks.find((task) => task.id === taskState.currentTask)
+				: undefined
+			const activeAssignment = isActiveAssignment(taskState.status, taskState.currentTask, unit?.status)
+
+			if (activeAssignment) {
+				if (currentOwner !== lease) {
+					await this.writeAssignmentOwner(taskContext, lease)
+					return lease
+				}
+
+				return currentOwner
+			}
+
+			if (currentOwner === lease) {
+				await this.writeAssignmentOwner(taskContext, NO_OWNER)
+				return NO_OWNER
+			}
+
+			return currentOwner
+		} catch (error) {
+			harnessLogger(this.harnessLogger).event("harness.assignment.owner.failed", {
+				level: "warn",
+				context: { taskId: taskContext.taskId, agentTaskId: this.taskId },
+				attributes: { error: error instanceof Error ? error.message : String(error) },
+			})
+			return currentOwner
+		}
+	}
+
+	private async writeAssignmentOwner(taskContext: TaskContext, owner: string): Promise<void> {
+		await new CanonicalReadmeWriter().update(taskContext.taskRoot, { Owner: owner })
+	}
+
+	/**
+	 * Describe the canonical `Owner` lease for the reconciler.
+	 *
+	 * The reconciler never reads the task history, so the activity of the owner is
+	 * resolved here: the lease is active when it names this task (it is running) or
+	 * the provider's current task (the single-open-task invariant means only one
+	 * task is active at a time).
+	 */
+	private assignmentOwnerContext(owner: string | null): AssignmentOwnerContext {
+		if (!owner || owner === NO_OWNER) {
+			return { mode: null, agentTaskId: null, active: false }
+		}
+
+		const separator = owner.indexOf("#")
+		const mode = separator === -1 ? owner : owner.slice(0, separator)
+		const agentTaskId = separator === -1 ? null : owner.slice(separator + 1)
+		const active = agentTaskId !== null && this.isAssignmentOwnerActive(agentTaskId)
+
+		return { mode, agentTaskId, active }
+	}
+
+	private isAssignmentOwnerActive(agentTaskId: string): boolean {
+		if (agentTaskId === this.taskId) {
+			return true
+		}
+
+		return this.providerRef.deref()?.getCurrentTask()?.taskId === agentTaskId
 	}
 
 	private getCurrentProfileId(state: any): string {

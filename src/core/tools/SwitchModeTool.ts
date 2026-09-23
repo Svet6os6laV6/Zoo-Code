@@ -1,14 +1,47 @@
 import delay from "delay"
 
+import { TaskStateResolver, type TaskStatus } from "@roo-code/core"
+
 import { Task } from "../task/Task"
 import { formatResponse } from "../prompts/responses"
 import { getModeBySlug } from "../../shared/modes"
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 import type { ToolUse } from "../../shared/tools"
+import { evaluateStageModeSwitchGate, isStageMode, type StageModeSwitchGateDecision } from "../harness/lifecycle-gate"
+import { emitGateRejected } from "../harness/gate-telemetry"
 
 interface SwitchModeParams {
 	mode_slug: string
 	reason: string
+}
+
+/**
+ * Resolve the canonical lifecycle status of the executing task and decide
+ * whether it may switch to `targetMode`.
+ *
+ * A task without a harness context (ordinary work outside harness tasks) has no
+ * canonical status to enforce, so the gate is a no-op: a failed context or
+ * state resolution allows the switch rather than blocking ordinary work.
+ */
+async function evaluateStageModeSwitchGateForTask(
+	task: Task,
+	currentMode: string,
+	targetMode: string,
+): Promise<StageModeSwitchGateDecision> {
+	let status: TaskStatus
+	try {
+		const context = await task.getTaskContext()
+		status = (await new TaskStateResolver().resolve(context)).status
+	} catch {
+		return { allowed: true }
+	}
+
+	return evaluateStageModeSwitchGate({
+		status,
+		currentMode,
+		targetMode,
+		hasParentTask: Boolean(task.parentTaskId),
+	})
 }
 
 export class SwitchModeTool extends BaseTool<"switch_mode"> {
@@ -48,6 +81,20 @@ export class SwitchModeTool extends BaseTool<"switch_mode"> {
 				task.didToolFailInCurrentTurn = true
 				pushToolResult(`Already in ${targetMode.name} mode.`)
 				return
+			}
+
+			// Harness-owned gate: a delegated stage child must not move itself into
+			// another stage mode — the harness owns stage transitions. The gate is a
+			// guard, not a model error, so it does not touch consecutiveMistakeCount
+			// or recordToolError (mirrors the new_task launch gate).
+			if (isStageMode(mode_slug)) {
+				const gate = await evaluateStageModeSwitchGateForTask(task, currentMode, mode_slug)
+
+				if (!gate.allowed) {
+					await emitGateRejected(() => task.getHarnessLogContext(), gate.gate, gate.reason)
+					pushToolResult(formatResponse.toolError(gate.reason))
+					return
+				}
 			}
 
 			const completeMessage = JSON.stringify({ tool: "switchMode", mode: mode_slug, reason })

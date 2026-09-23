@@ -15,6 +15,7 @@ vi.mock("vscode", () => ({
 // The lifecycle gate resolves the canonical task state through `TaskStateResolver`;
 // the resolver is replaced so the spec controls the status the gate observes.
 const resolveState = vi.hoisted(() => vi.fn())
+const emitEvent = vi.hoisted(() => vi.fn())
 
 vi.mock("@roo-code/core", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@roo-code/core")>()
@@ -23,6 +24,7 @@ vi.mock("@roo-code/core", async (importOriginal) => {
 		TaskStateResolver: class {
 			resolve = resolveState
 		},
+		harnessLogger: () => ({ event: emitEvent }),
 	}
 })
 
@@ -127,6 +129,7 @@ const mockCline = {
 	pausedModeSlug: "ask",
 	taskId: "mock-parent-task-id",
 	getTaskContext: vi.fn().mockResolvedValue(mockTaskContext),
+	getHarnessLogContext: vi.fn().mockResolvedValue({ taskId: "mock-parent-task-id", traceId: "trace-1" }),
 	enableCheckpoints: false,
 	checkpointSave: mockCheckpointSave,
 	startSubtask: mockStartSubtask,
@@ -739,6 +742,14 @@ describe("newTaskTool harness lifecycle gate", () => {
 		// The gate is a guard, not a model error.
 		expect(mockCline.consecutiveMistakeCount).toBe(0)
 		expect(mockRecordToolError).not.toHaveBeenCalled()
+		// The rejection is recorded as a warn gate record.
+		expect(emitEvent).toHaveBeenCalledWith(
+			"harness.gate.rejected",
+			expect.objectContaining({
+				level: "warn",
+				attributes: expect.objectContaining({ gate: "stage-launch" }),
+			}),
+		)
 	})
 
 	it("allows a non-stage mode while the task is PLAN_READY", async () => {

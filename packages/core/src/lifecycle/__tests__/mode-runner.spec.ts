@@ -1,5 +1,6 @@
 import * as path from "path"
 
+import { RecordingHarnessLogger } from "../../observability/__tests__/helpers/recording-logger.js"
 import type { TaskContext } from "../../worktree/task-resolver.js"
 import type { TaskState } from "../../worktree/task-state.js"
 import { TaskScheduler } from "../../worktree/task-scheduler.js"
@@ -451,5 +452,115 @@ describe("ModeRunner", () => {
 		expect(readme).toContain("Current Task: implementation/T02-unit.md")
 		expect(readme).toContain("Failure Key: NONE")
 		expect(readme).toContain("Failure Attempts: 0")
+	})
+
+	describe("lifecycle transition journal", () => {
+		it("journals one mutation for a stop that writes the status", async () => {
+			const fileSystem = createInMemoryFileSystem({
+				[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: ANALYSIS\nCurrent Task: NONE\n",
+			})
+			const logger = new RecordingHarnessLogger()
+			const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem, logger)
+
+			await runner.run(context, state("ANALYSIS"), {
+				type: "stop",
+				status: "PLAN_READY",
+				reason: "plan-approval",
+			})
+
+			const mutations = logger.byName("harness.lifecycle.transition")
+			expect(mutations).toHaveLength(1)
+			expect(mutations[0]).toMatchObject({
+				kind: "mutation",
+				target: readmePath,
+				stateBefore: { status: "ANALYSIS", currentTask: "NONE" },
+				stateAfter: { status: "PLAN_READY", currentTask: "NONE" },
+				attributes: { decision: "stop" },
+			})
+		})
+
+		it("journals one mutation for a start_mode that writes the status", async () => {
+			const fileSystem = createInMemoryFileSystem({
+				[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: REVIEW\nCurrent Task: NONE\n",
+			})
+			const logger = new RecordingHarnessLogger()
+			const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem, logger)
+
+			await runner.run(context, state("REVIEW"), {
+				type: "start_mode",
+				status: "REVIEW_PASSED",
+				mode: "qa",
+			})
+
+			const mutations = logger.byName("harness.lifecycle.transition")
+			expect(mutations).toHaveLength(1)
+			expect(mutations[0]).toMatchObject({
+				stateBefore: { status: "REVIEW" },
+				stateAfter: { status: "REVIEW_PASSED" },
+				attributes: { decision: "start_mode" },
+			})
+		})
+
+		it("journals the Refactor transition when the DAG has no ready unit left", async () => {
+			const fileSystem = createInMemoryFileSystem({
+				[readmePath]:
+					"Protocol Version: 2\nTask: SITESUP-1116\nStatus: IMPLEMENTATION\nCurrent Task: implementation/T01-unit.md\n",
+				[path.join(implementation, "T01-unit.md")]: "## Status\nStatus: DONE\n",
+			})
+			const logger = new RecordingHarnessLogger()
+			const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem, logger)
+
+			await runner.run(context, state("IMPLEMENTATION", "T01"), {
+				type: "schedule_implementation",
+				status: "READY_FOR_IMPLEMENTATION",
+			})
+
+			const mutations = logger.byName("harness.lifecycle.transition")
+			expect(mutations).toHaveLength(1)
+			expect(mutations[0]).toMatchObject({
+				stateBefore: { status: "IMPLEMENTATION" },
+				stateAfter: { status: "READY_FOR_REFACTOR" },
+				attributes: { decision: "schedule_implementation" },
+			})
+		})
+
+		it("journals the resume transition before the scheduler assigns the next unit", async () => {
+			const fileSystem = createInMemoryFileSystem({
+				[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: PLAN_READY\nCurrent Task: NONE\n",
+				[path.join(implementation, "T01-unit.md")]: "## Status\nStatus: TODO\n",
+			})
+			const logger = new RecordingHarnessLogger()
+			const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem, logger)
+
+			await runner.run(context, state("PLAN_READY"), {
+				type: "resume_implementation",
+				status: "READY_FOR_IMPLEMENTATION",
+			})
+
+			const mutations = logger.byName("harness.lifecycle.transition")
+			expect(mutations).toHaveLength(1)
+			expect(mutations[0]).toMatchObject({
+				stateBefore: { status: "PLAN_READY" },
+				stateAfter: { status: "READY_FOR_IMPLEMENTATION" },
+				attributes: { decision: "resume_implementation" },
+			})
+		})
+
+		it("does not journal an idempotent write that changes no field", async () => {
+			const fileSystem = createInMemoryFileSystem({
+				[readmePath]:
+					"Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\nFailure Key: NONE\nFailure Attempts: 0\n",
+			})
+			const logger = new RecordingHarnessLogger()
+			const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem, logger)
+
+			await runner.run(context, state("QA_READY"), {
+				type: "stop",
+				status: "QA_READY",
+				reason: "pending",
+			})
+
+			expect(logger.byName("harness.lifecycle.transition")).toHaveLength(0)
+		})
 	})
 })

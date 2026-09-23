@@ -11,6 +11,23 @@ vi.mock("delay", () => ({
 	default: vi.fn().mockResolvedValue(undefined),
 }))
 
+// The lifecycle gate resolves the canonical task state through `TaskStateResolver`
+// and emits rejections through `harnessLogger`; both are replaced so the spec
+// controls the status the gate observes and can assert the warn record.
+const resolveState = vi.hoisted(() => vi.fn())
+const emitEvent = vi.hoisted(() => vi.fn())
+
+vi.mock("@roo-code/core", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@roo-code/core")>()
+	return {
+		...actual,
+		TaskStateResolver: class {
+			resolve = resolveState
+		},
+		harnessLogger: () => ({ event: emitEvent }),
+	}
+})
+
 // Mock the modes module
 vi.mock("../../../shared/modes", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../../../shared/modes")>()
@@ -22,6 +39,7 @@ vi.mock("../../../shared/modes", async (importOriginal) => {
 				code: { slug: "code", name: "Code" },
 				architect: { slug: "architect", name: "Architect" },
 				ask: { slug: "ask", name: "Ask" },
+				reviewer: { slug: "reviewer", name: "Reviewer" },
 			}
 			return customModes?.find((mode) => mode.slug === slug) ?? builtInModes[slug]
 		}),
@@ -47,6 +65,10 @@ describe("SwitchModeTool", () => {
 			didToolFailInCurrentTurn: false,
 			sayAndCreateMissingParamError: vi.fn().mockResolvedValue("Missing parameter error"),
 			ask: vi.fn().mockResolvedValue({}),
+			// Default: no harness context, so the stage-mode-switch gate is a no-op.
+			parentTaskId: undefined,
+			getTaskContext: vi.fn().mockRejectedValue(new Error("no harness context")),
+			getHarnessLogContext: vi.fn().mockResolvedValue({ taskId: "fix-2", traceId: "trace-1" }),
 			providerRef: {
 				deref: vi.fn().mockReturnValue({
 					getState: mockGetState,
@@ -365,5 +387,70 @@ describe("SwitchModeTool", () => {
 		expect(mockCallbacks.pushToolResult).toHaveBeenCalledWith(
 			"Successfully switched from Code mode to Ask mode because: test.",
 		)
+	})
+
+	// ===== Harness stage-mode-switch gate =====
+
+	describe("stage-mode-switch gate", () => {
+		const taskContext = { taskId: "fix-2", branch: "fix-2", taskRoot: "/workspace/.roo/tasks/fix-2" }
+
+		function childTask(): Task {
+			return {
+				...mockTask,
+				parentTaskId: "parent-1",
+				getTaskContext: vi.fn().mockResolvedValue(taskContext),
+			} as unknown as Task
+		}
+
+		beforeEach(() => {
+			resolveState.mockResolvedValue({ status: "IMPLEMENTATION" })
+		})
+
+		it("rejects a delegated stage child switching to another stage mode", async () => {
+			const task = childTask()
+			vi.mocked(task.getTaskMode).mockResolvedValue("code")
+
+			const block = createBlock({ mode_slug: "reviewer", reason: "review the work" })
+
+			await switchModeTool.handle(task, block, mockCallbacks)
+
+			expect(mockHandleModeSwitch).not.toHaveBeenCalled()
+			expect(mockCallbacks.askApproval).not.toHaveBeenCalled()
+			expect(mockCallbacks.pushToolResult).toHaveBeenCalledWith(expect.stringContaining("stage"))
+			expect(emitEvent).toHaveBeenCalledWith(
+				"harness.gate.rejected",
+				expect.objectContaining({
+					level: "warn",
+					attributes: expect.objectContaining({ gate: "stage-mode-switch" }),
+				}),
+			)
+			// The gate is a guard, not a model error.
+			expect(task.consecutiveMistakeCount).toBe(0)
+			expect(task.recordToolError).not.toHaveBeenCalled()
+		})
+
+		it("allows a root task to switch between stage modes", async () => {
+			vi.mocked(mockTask.getTaskMode).mockResolvedValue("code")
+			mockTask.getTaskContext = vi.fn().mockResolvedValue(taskContext)
+
+			const block = createBlock({ mode_slug: "reviewer", reason: "review the work" })
+
+			await switchModeTool.handle(mockTask, block, mockCallbacks)
+
+			expect(mockHandleModeSwitch).toHaveBeenCalledWith("reviewer")
+			expect(emitEvent).not.toHaveBeenCalled()
+		})
+
+		it("allows a delegated child to switch to a non-stage mode", async () => {
+			const task = childTask()
+			vi.mocked(task.getTaskMode).mockResolvedValue("code")
+
+			const block = createBlock({ mode_slug: "ask", reason: "quick question" })
+
+			await switchModeTool.handle(task, block, mockCallbacks)
+
+			expect(mockHandleModeSwitch).toHaveBeenCalledWith("ask")
+			expect(emitEvent).not.toHaveBeenCalled()
+		})
 	})
 })

@@ -2,7 +2,12 @@
 
 import type { ImplementationArtifacts, ImplementationTask } from "@roo-code/core"
 
-import { computeArtifactFingerprint } from "../artifact-fingerprint"
+import {
+	computeArtifactFingerprint,
+	computeArtifactStatFingerprint,
+	type ArtifactStatEntry,
+	type ArtifactStatFingerprintInput,
+} from "../artifact-fingerprint"
 
 function unit(id: string, contentHash: string, fileName = `${id}-unit.md`): ImplementationTask {
 	return {
@@ -108,5 +113,95 @@ describe("computeArtifactFingerprint", () => {
 		expect(computeArtifactFingerprint({ readme: null, snapshot: artifacts })).not.toBe(
 			computeArtifactFingerprint({ readme: "# Task\n", snapshot: artifacts }),
 		)
+	})
+})
+
+function stat(name: string, mtimeMs: number | null, size: number | null): ArtifactStatEntry {
+	return { name, mtimeMs, size }
+}
+
+function statInput(overrides: Partial<ArtifactStatFingerprintInput> = {}): ArtifactStatFingerprintInput {
+	return {
+		readme: stat("README.md", 1_000, 200),
+		implementation: [stat("T01-unit.md", 1_000, 100)],
+		...overrides,
+	}
+}
+
+describe("computeArtifactStatFingerprint", () => {
+	it("returns the same fingerprint for identical metadata", () => {
+		const input = statInput()
+
+		expect(computeArtifactStatFingerprint(input)).toBe(computeArtifactStatFingerprint(input))
+	})
+
+	it("is independent of the readdir order of the implementation files", () => {
+		const first = statInput({
+			implementation: [stat("T01-a.md", 1, 10), stat("T02-b.md", 2, 20)],
+		})
+		const second = statInput({
+			implementation: [stat("T02-b.md", 2, 20), stat("T01-a.md", 1, 10)],
+		})
+
+		expect(computeArtifactStatFingerprint(first)).toBe(computeArtifactStatFingerprint(second))
+	})
+
+	it("changes when a file is renamed", () => {
+		const before = statInput({ implementation: [stat("T01-old.md", 1, 10)] })
+		const after = statInput({ implementation: [stat("T01-new.md", 1, 10)] })
+
+		expect(computeArtifactStatFingerprint(before)).not.toBe(computeArtifactStatFingerprint(after))
+	})
+
+	it("changes when a file is added or removed", () => {
+		const one = statInput({ implementation: [stat("T01-a.md", 1, 10)] })
+		const two = statInput({ implementation: [stat("T01-a.md", 1, 10), stat("T02-b.md", 2, 20)] })
+
+		expect(computeArtifactStatFingerprint(one)).not.toBe(computeArtifactStatFingerprint(two))
+	})
+
+	it("changes when a file size changes at the same mtime", () => {
+		const before = statInput({ implementation: [stat("T01-a.md", 1, 10)] })
+		const after = statInput({ implementation: [stat("T01-a.md", 1, 11)] })
+
+		expect(computeArtifactStatFingerprint(before)).not.toBe(computeArtifactStatFingerprint(after))
+	})
+
+	it("changes when a file mtime changes at the same size", () => {
+		const before = statInput({ implementation: [stat("T01-a.md", 1, 10)] })
+		const after = statInput({ implementation: [stat("T01-a.md", 2, 10)] })
+
+		expect(computeArtifactStatFingerprint(before)).not.toBe(computeArtifactStatFingerprint(after))
+	})
+
+	it("changes when the README metadata changes", () => {
+		const before = statInput({ readme: stat("README.md", 1, 200) })
+		const after = statInput({ readme: stat("README.md", 2, 200) })
+
+		expect(computeArtifactStatFingerprint(before)).not.toBe(computeArtifactStatFingerprint(after))
+	})
+
+	it("treats a readable empty implementation directory as a valid value", () => {
+		const empty = statInput({ implementation: [] })
+
+		expect(computeArtifactStatFingerprint(empty)).not.toBeNull()
+		expect(computeArtifactStatFingerprint(empty)).toBe(
+			computeArtifactStatFingerprint(statInput({ implementation: [] })),
+		)
+	})
+
+	it("fails safe to null when the README is missing", () => {
+		expect(computeArtifactStatFingerprint(statInput({ readme: null }))).toBeNull()
+	})
+
+	it("fails safe to null when the implementation directory is unreadable", () => {
+		expect(computeArtifactStatFingerprint(statInput({ implementation: null }))).toBeNull()
+	})
+
+	it("fails safe to null when a stat field is unavailable", () => {
+		expect(computeArtifactStatFingerprint(statInput({ readme: stat("README.md", null, 200) }))).toBeNull()
+		expect(computeArtifactStatFingerprint(statInput({ readme: stat("README.md", 1, null) }))).toBeNull()
+		expect(computeArtifactStatFingerprint(statInput({ implementation: [stat("T01-a.md", null, 10)] }))).toBeNull()
+		expect(computeArtifactStatFingerprint(statInput({ implementation: [stat("T01-a.md", 1, null)] }))).toBeNull()
 	})
 })

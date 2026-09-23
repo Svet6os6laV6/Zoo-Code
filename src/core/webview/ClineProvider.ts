@@ -70,8 +70,13 @@ import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTa
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
 import {
+	CanonicalReadmeWriter,
 	LIFECYCLE_MODES,
 	LifecycleError,
+	NO_CURRENT_TASK,
+	NO_OWNER,
+	readCanonicalFields,
+	readmePath,
 	TaskStateResolver,
 	harnessLogger,
 	type HarnessLogContextInput,
@@ -123,6 +128,7 @@ import { ProviderSettingsManager } from "../config/ProviderSettingsManager"
 import { CustomModesManager } from "../config/CustomModesManager"
 import { Task } from "../task/Task"
 import { HarnessModeRunner } from "../harness/mode-runner"
+import type { PlanApprovalOutcome } from "../harness/plan-approval"
 
 import { webviewMessageHandler } from "./webviewMessageHandler"
 import type { ClineMessage, TodoItem } from "@roo-code/types"
@@ -3704,6 +3710,24 @@ export class ClineProvider
 		// Immediately mark the original instance as abandoned to prevent any residual activity
 		task.abandoned = true
 
+		// The cancelled task no longer holds the assignment lease. Release it so a
+		// later resolve does not report a stale owner as active. Best effort: a
+		// failure must not change the cancellation.
+		try {
+			const context = await task.getTaskContext()
+			const mode = await task.getTaskMode().catch(() => null)
+
+			if (mode) {
+				await this.clearAssignmentOwner(context.taskRoot, `${mode}#${task.taskId}`)
+			}
+		} catch (error) {
+			this.log(
+				`[cancelTask] Failed to release the assignment owner for ${task.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		}
+
 		await pWaitFor(
 			() =>
 				this.getCurrentTask()! === undefined ||
@@ -4219,19 +4243,96 @@ export class ClineProvider
 	 * model-initiated `new_task`.
 	 */
 	private harnessModeRunner(parentTaskId: string): HarnessModeRunner {
-		return new HarnessModeRunner(async (mode, message) => {
-			const { customModes } = await this.getState()
-			if (!getModeBySlug(mode, customModes)) {
-				throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
+		return new HarnessModeRunner(
+			async (mode, message) => {
+				await this.assertLifecycleModeConfigured(mode)
+
+				const child = await this.delegateParentAndOpenChild({
+					parentTaskId,
+					message,
+					initialTodos: [],
+					mode,
+				})
+
+				// Record the executor lease as soon as the stage-child exists, so an
+				// assignment is never left ownerless between the delegation and the
+				// child's first resolve. Diagnostic only: a failure must not stop the
+				// stage from starting.
+				await this.recordExecutorOwner(child, mode)
+			},
+			// The root harness logger carries the configured sinks; the runner binds
+			// the task's trace context per call, so lifecycle mutation records land in
+			// the right trace.
+			{ logger: harnessLogger() },
+		)
+	}
+
+	/**
+	 * Assert that `mode` exists in the user's configuration before a harness stage
+	 * is delegated to it. Shared by the two runner construction sites so a missing
+	 * mode fails identically on both paths.
+	 */
+	private async assertLifecycleModeConfigured(mode: string): Promise<void> {
+		const { customModes } = await this.getState()
+		if (!getModeBySlug(mode, customModes)) {
+			throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
+		}
+	}
+
+	/**
+	 * Record the canonical `Owner` lease for a stage-child the harness just started.
+	 *
+	 * The lease is diagnostic only (see `StateReconciler`): it names the task that
+	 * is running the assigned unit. It is written only when the canonical state
+	 * actually assigns a unit, so a stage that runs without an assignment (for
+	 * example Refactor after the DAG is exhausted) does not claim one. Best effort:
+	 * a failure must not stop the stage from starting.
+	 */
+	private async recordExecutorOwner(task: Task, mode: string): Promise<void> {
+		try {
+			const context = await task.getTaskContext()
+			const readme = await fs.readFile(readmePath(context.taskRoot), "utf8")
+			const current = readCanonicalFields(readme)
+
+			if (
+				current.status !== "IMPLEMENTATION" ||
+				!current.currentTask ||
+				current.currentTask === NO_CURRENT_TASK
+			) {
+				return
 			}
 
-			await this.delegateParentAndOpenChild({
-				parentTaskId,
-				message,
-				initialTodos: [],
-				mode,
-			})
-		})
+			await new CanonicalReadmeWriter().update(context.taskRoot, { Owner: `${mode}#${task.taskId}` })
+		} catch (error) {
+			this.log(
+				`[recordExecutorOwner] Failed to record the assignment owner for ${task.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		}
+	}
+
+	/**
+	 * Release the canonical `Owner` lease held by `owner` (for example
+	 * `<childMode>#<childTaskId>`), leaving a lease held by another task intact.
+	 * Best effort: a failure must not change the transition it observes.
+	 */
+	private async clearAssignmentOwner(taskRoot: string, owner: string): Promise<void> {
+		try {
+			const readme = await fs.readFile(readmePath(taskRoot), "utf8")
+
+			if (readCanonicalFields(readme).owner !== owner) {
+				return
+			}
+
+			await new CanonicalReadmeWriter().update(taskRoot, { Owner: NO_OWNER })
+		} catch (error) {
+			this.log(
+				`[clearAssignmentOwner] Failed to release the assignment owner ${owner}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		}
 	}
 
 	/**
@@ -4280,7 +4381,12 @@ export class ClineProvider
 			return false
 		}
 
-		if (!isLifecycleMode(mode)) {
+		// A stage outcome (`resultText`) is only meaningful for a lifecycle mode:
+		// the reply is parsed as a `Stage Result`. The state-only path has no reply
+		// to parse — it advances from the canonical state alone — so a chain owner
+		// in any mode (for example `orchestrator`) may continue. The
+		// `hasStageInFlight` guard below still prevents a second parallel chain.
+		if (resultText !== undefined && !isLifecycleMode(mode)) {
 			return false
 		}
 
@@ -4491,6 +4597,72 @@ export class ClineProvider
 					error instanceof Error ? error.message : String(error)
 				}`,
 			)
+		}
+	}
+
+	/**
+	 * Approve the plan of `task` from inside the running task itself (the
+	 * `approve_plan` tool).
+	 *
+	 * Same harness-owned action as `approvePlanTask`, with two differences that
+	 * follow from the caller being the model rather than the UI: the task is the
+	 * caller's own task (not the focused one), and there is no modal confirmation —
+	 * the explicit approval signal is the model's tool call, which already passed
+	 * the ordinary tool-approval flow (`ApprovePlanTool`).
+	 *
+	 * The harness still decides: `HarnessModeRunner.approvePlan` returns `null`
+	 * unless the canonical state is `PLAN_READY`, so a stale call leaves the task
+	 * unchanged. Returns what the harness did so the caller can report the unit the
+	 * harness assigned.
+	 */
+	public async approvePlanForTask(task: Task): Promise<PlanApprovalOutcome> {
+		try {
+			const result = await this.harnessModeRunner(task.taskId).approvePlan(task)
+
+			if (!result || result.type === "invalid") {
+				return {
+					approved: false,
+					status: null,
+					currentTask: null,
+					reason:
+						`Task ${task.taskId} was not approved; the harness left it unchanged. ` +
+						"Plan approval is only possible from the PLAN_READY gate.",
+				}
+			}
+
+			return {
+				approved: true,
+				status: result.status,
+				currentTask: await this.readAssignedUnit(task),
+				reason: null,
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			this.log(`[approvePlanForTask] Approval failed: ${message}`)
+
+			return {
+				approved: false,
+				status: null,
+				currentTask: null,
+				reason: `Failed to approve the plan for task ${task.taskId}: ${message}`,
+			}
+		}
+	}
+
+	/**
+	 * The unit the canonical state assigns after the approval (`Current Task`), or
+	 * `null` when none is assigned.
+	 *
+	 * Best effort: the approval itself already succeeded, so a state read failure
+	 * only means the caller cannot name the unit it started.
+	 */
+	private async readAssignedUnit(task: Task): Promise<string | null> {
+		try {
+			const state = await new TaskStateResolver().resolve(await task.getTaskContext())
+
+			return state.currentTask ?? null
+		} catch {
+			return null
 		}
 	}
 
@@ -4746,6 +4918,22 @@ export class ClineProvider
 
 			// 8) Inject restored histories into the in-memory instance before resuming
 			if (parentInstance) {
+				// The completed child no longer holds the assignment lease. Release it
+				// before the next stage starts, so a late release cannot clear the lease
+				// the new stage is about to claim.
+				if (childHistory?.mode) {
+					try {
+						const context = await parentInstance.getTaskContext()
+						await this.clearAssignmentOwner(context.taskRoot, `${childHistory.mode}#${childTaskId}`)
+					} catch (error) {
+						this.log(
+							`[reopenParentFromDelegation] Failed to release the assignment owner for child ${childTaskId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						)
+					}
+				}
+
 				try {
 					await parentInstance.overwriteClineMessages(parentClineMessages, false)
 				} catch {
@@ -4760,21 +4948,40 @@ export class ClineProvider
 				if (childHistory?.mode) {
 					try {
 						const requirePlanApproval = this.requirePlanApproval()
-						const lifecycleResult = await new HarnessModeRunner(async (mode, message) => {
-							const { customModes } = await this.getState()
-							if (!getModeBySlug(mode, customModes)) {
-								throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
-							}
+						const runner = new HarnessModeRunner(
+							async (mode, message) => {
+								await this.assertLifecycleModeConfigured(mode)
 
-							await this.delegateParentAndOpenChildUnlocked({
-								parentTaskId,
-								message,
-								initialTodos: [],
-								mode,
-							})
-						}).run(parentInstance, childHistory.mode, completionResultSummary, { requirePlanApproval })
+								await this.delegateParentAndOpenChildUnlocked({
+									parentTaskId,
+									message,
+									initialTodos: [],
+									mode,
+								})
+							},
+							{ logger: harnessLogger() },
+						)
 
-						if (lifecycleResult) {
+						const lifecycleResult = await runner.run(
+							parentInstance,
+							childHistory.mode,
+							completionResultSummary,
+							{ requirePlanApproval },
+						)
+
+						// A stage-child that finished without an unambiguous stage marker
+						// cannot be routed from its reply. The canonical state alone may
+						// still be routable — a completed unit with a ready successor, or a
+						// cancelled stage-child that was resumed and finished — so fall back
+						// to the state-only continue. It is self-guarded by `assignNext`: it
+						// either starts the next stage or changes nothing.
+						const continuedResult =
+							lifecycleResult ??
+							(isLifecycleMode(childHistory.mode)
+								? await runner.continue(parentInstance, { requirePlanApproval })
+								: null)
+
+						if (continuedResult) {
 							this.cancelledDelegationChildIds.delete(childTaskId)
 							return true
 						}

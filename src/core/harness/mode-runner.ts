@@ -4,7 +4,10 @@ import {
 	ModeRunner,
 	TaskStateResolver,
 	TxxParser,
+	harnessLogger,
 	parseStageOutcome,
+	type HarnessLogContextInput,
+	type HarnessLoggerPort,
 	type LifecycleMode,
 	type LifecycleResult,
 	type ModeRunResult,
@@ -14,6 +17,13 @@ import {
 
 type LifecycleTask = {
 	getTaskContext(): Promise<TaskContext>
+	/**
+	 * The task's harness log identity (`traceId`, `taskId`, ...). Optional so the
+	 * adapter still works with a minimal task double; when present, the lifecycle
+	 * mutation records are bound to the task's trace instead of the unbound
+	 * fallback identity.
+	 */
+	getHarnessLogContext?(): Promise<HarnessLogContextInput>
 }
 
 type HarnessModeRunnerDependencies = {
@@ -22,6 +32,8 @@ type HarnessModeRunnerDependencies = {
 	readonly modeRunner?: Pick<ModeRunner, "run">
 	readonly parser?: Pick<TxxParser, "read">
 	readonly validator?: Pick<ArtifactValidator, "validate">
+	/** Explicit injection for tests; defaults to the process-wide harness logger. */
+	readonly logger?: HarnessLoggerPort
 }
 
 export class HarnessModeRunner {
@@ -30,6 +42,7 @@ export class HarnessModeRunner {
 	private readonly modeRunner: Pick<ModeRunner, "run">
 	private readonly parser: Pick<TxxParser, "read">
 	private readonly validator: Pick<ArtifactValidator, "validate">
+	private readonly logger?: HarnessLoggerPort
 
 	constructor(
 		startMode: (mode: LifecycleMode, message: string) => Promise<void>,
@@ -37,9 +50,11 @@ export class HarnessModeRunner {
 	) {
 		this.stateResolver = dependencies.stateResolver ?? new TaskStateResolver()
 		this.controller = dependencies.controller ?? new LifecycleController()
-		this.modeRunner = dependencies.modeRunner ?? new ModeRunner(startMode)
+		this.modeRunner =
+			dependencies.modeRunner ?? new ModeRunner(startMode, undefined, undefined, dependencies.logger)
 		this.parser = dependencies.parser ?? new TxxParser()
 		this.validator = dependencies.validator ?? new ArtifactValidator()
+		this.logger = dependencies.logger
 	}
 
 	/**
@@ -63,7 +78,7 @@ export class HarnessModeRunner {
 		const context = await task.getTaskContext()
 		const state = await this.stateResolver.resolve(context)
 
-		return this.applyDecision(context, state, this.controller.transition(state, outcome, options))
+		return this.applyDecision(task, context, state, this.controller.transition(state, outcome, options))
 	}
 
 	/**
@@ -78,7 +93,7 @@ export class HarnessModeRunner {
 		const context = await task.getTaskContext()
 		const state = await this.stateResolver.resolve(context)
 
-		return this.applyDecision(context, state, this.controller.resume(state, unblockConditionMet))
+		return this.applyDecision(task, context, state, this.controller.resume(state, unblockConditionMet))
 	}
 
 	/**
@@ -94,7 +109,7 @@ export class HarnessModeRunner {
 		const context = await task.getTaskContext()
 		const state = await this.stateResolver.resolve(context)
 
-		return this.applyDecision(context, state, this.controller.approvePlan(state))
+		return this.applyDecision(task, context, state, this.controller.approvePlan(state))
 	}
 
 	/**
@@ -122,6 +137,7 @@ export class HarnessModeRunner {
 		const report = await this.validator.validate(context, { status: state.status }, artifacts)
 
 		return this.applyDecision(
+			task,
 			context,
 			state,
 			this.controller.resolve({
@@ -140,6 +156,7 @@ export class HarnessModeRunner {
 	 * result — collapse into `null`, the single fall-back signal the callers act on.
 	 */
 	private async applyDecision(
+		task: LifecycleTask,
 		context: TaskContext,
 		state: TaskState,
 		decision: LifecycleResult,
@@ -148,8 +165,28 @@ export class HarnessModeRunner {
 			return null
 		}
 
-		const result = await this.modeRunner.run(context, state, decision)
+		const logger = harnessLogger(this.logger)
+		const run = () => this.modeRunner.run(context, state, decision)
+		const logContext = await this.harnessLogContext(task)
+		const result = logContext ? await logger.runWithContext(logContext, run) : await run()
 
 		return result.type === "invalid" ? null : result
+	}
+
+	/**
+	 * The task's harness log identity, or `null` when the task double does not
+	 * expose one. A failure to resolve it is non-fatal: the lifecycle still runs,
+	 * only the mutation record falls back to the ambient/unbound identity.
+	 */
+	private async harnessLogContext(task: LifecycleTask): Promise<HarnessLogContextInput | null> {
+		if (!task.getHarnessLogContext) {
+			return null
+		}
+
+		try {
+			return await task.getHarnessLogContext()
+		} catch {
+			return null
+		}
 	}
 }

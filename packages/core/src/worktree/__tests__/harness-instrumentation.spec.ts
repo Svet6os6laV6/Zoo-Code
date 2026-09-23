@@ -291,6 +291,7 @@ describe("TaskScheduler instrumentation", () => {
 		expect(mutation?.stateBefore).toEqual({
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
+			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
@@ -298,6 +299,7 @@ describe("TaskScheduler instrumentation", () => {
 		expect(mutation?.stateAfter).toEqual({
 			status: "IMPLEMENTATION",
 			currentTask: "implementation/T02-worker.md",
+			owner: null,
 			nextStep: "Implement T02 (implementation/T02-worker.md).",
 			failureKey: "NONE",
 			failureAttempts: "0",

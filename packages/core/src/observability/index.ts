@@ -66,6 +66,7 @@ export {
 export {
 	StateReconciler,
 	diffTaskState,
+	type AssignmentOwnerContext,
 	type StateDifference,
 	type StateReconcileOptions,
 	type StateReconciliation,

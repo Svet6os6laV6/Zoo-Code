@@ -318,6 +318,39 @@ describe("NativeToolCallParser", () => {
 				})
 			})
 		})
+
+		describe("approve_plan tool", () => {
+			// `parseToolCall` rejects unknown tool names, so a successful parse is
+			// also the assertion that the tool is registered canonically.
+			it("parses the optional reason into nativeArgs", () => {
+				const toolCall = {
+					id: "toolu_approve",
+					name: "approve_plan" as const,
+					arguments: JSON.stringify({ reason: "Plan reviewed" }),
+				}
+
+				const result = NativeToolCallParser.parseToolCall(toolCall)
+
+				expect(result?.type).toBe("tool_use")
+				if (result?.type === "tool_use") {
+					expect(result.name).toBe("approve_plan")
+					expect(result.nativeArgs).toEqual({ reason: "Plan reviewed" })
+				}
+			})
+
+			it("parses an argument-less call (the call itself is the signal)", () => {
+				const toolCall = { id: "toolu_approve", name: "approve_plan" as const, arguments: "" }
+
+				const result = NativeToolCallParser.parseToolCall(toolCall)
+
+				expect(result?.type).toBe("tool_use")
+				if (result?.type === "tool_use") {
+					// A missing reason must still produce typed args: an absent
+					// `nativeArgs` would make the tool call unrunnable.
+					expect(result.nativeArgs).toEqual({})
+				}
+			})
+		})
 	})
 
 	describe("processStreamingChunk", () => {

@@ -9,6 +9,7 @@ import type { Task } from "../../task/Task"
 const mockResolve = vi.hoisted(() => vi.fn())
 const mockWriteToFileHandle = vi.hoisted(() => vi.fn())
 const mockApplyPatchHandle = vi.hoisted(() => vi.fn())
+const mockEvent = vi.hoisted(() => vi.fn())
 
 vi.mock("../../task/Task")
 vi.mock("../../tools/validateToolUse", () => ({
@@ -42,7 +43,7 @@ vi.mock("@roo-code/core", () => ({
 		has: vi.fn(() => false),
 		get: vi.fn(),
 	},
-	harnessLogger: () => ({ event: vi.fn() }),
+	harnessLogger: () => ({ event: mockEvent }),
 	TaskStateResolver: class {
 		resolve = mockResolve
 	},
@@ -53,6 +54,7 @@ const TASK_ROOT = "/workspace/.roo/tasks/fix-01"
 interface MockTask {
 	taskId: string
 	instanceId: string
+	parentTaskId?: string
 	abort: boolean
 	presentAssistantMessageLocked: boolean
 	presentAssistantMessageHasPendingUpdates: boolean
@@ -116,6 +118,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockTask = {
 			taskId: "test-task-id",
 			instanceId: "test-instance",
+			parentTaskId: undefined,
 			abort: false,
 			presentAssistantMessageLocked: false,
 			presentAssistantMessageHasPendingUpdates: false,
@@ -182,6 +185,14 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		expect(mockTask.userMessageContent).toHaveLength(1)
 		expect(mockTask.userMessageContent[0].content).toContain("PLAN_READY")
 		expect(mockTask.userMessageContent[0].content).toContain("read-only")
+		// The existing gate rejection is recorded too.
+		expect(mockEvent).toHaveBeenCalledWith(
+			"harness.gate.rejected",
+			expect.objectContaining({
+				level: "warn",
+				attributes: expect.objectContaining({ gate: "artifact-mutation" }),
+			}),
+		)
 	})
 
 	it("rejects a mutation of an artifact while the task is BLOCKED", async () => {
@@ -241,6 +252,51 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		await presentAssistantMessage(mockTask as unknown as Task)
 
 		expect(mockApplyPatchHandle).toHaveBeenCalledTimes(1)
+		expect(mockTask.userMessageContent).toHaveLength(0)
+	})
+
+	// ===== Unit-mutation gate (delegated stage child) =====
+
+	const assignedArtifact = `${TASK_ROOT}/implementation/T05-stage-gates-extension.md`
+
+	it("rejects a delegated stage child mutating another unit during IMPLEMENTATION", async () => {
+		mockTask.parentTaskId = "parent-1"
+		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION", currentTaskArtifact: assignedArtifact })
+		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T07-other.md")]
+
+		await presentAssistantMessage(mockTask as unknown as Task)
+
+		expect(mockWriteToFileHandle).not.toHaveBeenCalled()
+		expect(mockTask.userMessageContent[0].content).toContain("another unit")
+		expect(mockEvent).toHaveBeenCalledWith(
+			"harness.gate.rejected",
+			expect.objectContaining({
+				level: "warn",
+				attributes: expect.objectContaining({ gate: "unit-mutation" }),
+			}),
+		)
+	})
+
+	it("allows a delegated stage child mutating its assigned unit", async () => {
+		mockTask.parentTaskId = "parent-1"
+		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION", currentTaskArtifact: assignedArtifact })
+		mockTask.assistantMessageContent = [
+			writeToFileBlock(".roo/tasks/fix-01/implementation/T05-stage-gates-extension.md"),
+		]
+
+		await presentAssistantMessage(mockTask as unknown as Task)
+
+		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
+		expect(mockTask.userMessageContent).toHaveLength(0)
+	})
+
+	it("allows a root task to mutate any unit during IMPLEMENTATION", async () => {
+		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION", currentTaskArtifact: null })
+		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T07-other.md")]
+
+		await presentAssistantMessage(mockTask as unknown as Task)
+
+		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)
 	})
 })

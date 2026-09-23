@@ -652,6 +652,14 @@ export class NativeToolCallParser {
 				}
 				break
 
+			case "approve_plan":
+				// No required parameters: the call itself is the signal, so the typed
+				// args are always constructible (an absent `reason` is simply omitted).
+				nativeArgs = {
+					reason: partialArgs.reason ?? undefined,
+				}
+				break
+
 			default:
 				break
 		}
@@ -1007,6 +1015,14 @@ export class NativeToolCallParser {
 							todos: args.todos,
 						} as NativeArgsFor<TName>
 					}
+					break
+
+				case "approve_plan":
+					// No required parameters: the call itself is the signal, so the typed
+					// args are always constructible (an absent `reason` is simply omitted).
+					nativeArgs = {
+						reason: args.reason ?? undefined,
+					} as NativeArgsFor<TName>
 					break
 
 				default:

@@ -6,6 +6,7 @@ import { harnessLogger } from "../observability/harness-logger.js"
 import type { HarnessLogLevel, HarnessLoggerPort } from "../observability/types.js"
 
 import type { TaskContext } from "./task-resolver.js"
+import type { ImplementationTaskStatus } from "./txx-parser.js"
 
 export const TASK_STATUSES = [
 	"ANALYSIS",
@@ -33,6 +34,24 @@ export type TaskState = {
 	readonly failureKey: string | null
 	/** Fix passes already spent on {@link failureKey}; `0` when no fix pass is running. */
 	readonly failureAttempts: number
+}
+
+/**
+ * Whether the canonical state currently has an implementation unit being
+ * executed: `IMPLEMENTATION` with an assigned unit that is still `TODO` or
+ * `IN_PROGRESS`. A `DONE`/`BLOCKED` unit is finishing or stalled, not executing.
+ *
+ * Shared by the resolve (reconcile trigger), the `Owner` lease sync, and the
+ * reconciler's ownerless-assignment check, so the three cannot drift apart.
+ */
+export function isActiveAssignment(
+	status: TaskStatus,
+	currentTask: string | null,
+	unitStatus: ImplementationTaskStatus | null | undefined,
+): boolean {
+	return (
+		status === "IMPLEMENTATION" && currentTask !== null && (unitStatus === "TODO" || unitStatus === "IN_PROGRESS")
+	)
 }
 
 type TaskStateFileSystem = {

@@ -227,3 +227,28 @@ describe("filterNativeToolsForMode - access_mcp_resource allowlist", () => {
 		})
 	})
 })
+
+describe("filterNativeToolsForMode - approve_plan availability", () => {
+	const nativeTools: OpenAI.Chat.ChatCompletionTool[] = [makeTool("approve_plan"), makeTool("new_task")]
+
+	function names(tools: OpenAI.Chat.ChatCompletionTool[]): string[] {
+		return tools.flatMap((tool) => ("function" in tool ? [tool.function.name] : []))
+	}
+
+	it("offers approve_plan to the orchestrator", () => {
+		const result = filterNativeToolsForMode(nativeTools, "orchestrator", undefined, undefined, undefined, {})
+
+		expect(names(result)).toContain("approve_plan")
+		// The orchestrator keeps the ordinary delegation tool as well.
+		expect(names(result)).toContain("new_task")
+	})
+
+	it("hides approve_plan from every stage mode", () => {
+		for (const mode of ["architect", "code", "refactor", "reviewer", "qa"]) {
+			const result = filterNativeToolsForMode(nativeTools, mode, undefined, undefined, undefined, {})
+
+			expect(names(result)).not.toContain("approve_plan")
+			expect(names(result)).toContain("new_task")
+		}
+	})
+})

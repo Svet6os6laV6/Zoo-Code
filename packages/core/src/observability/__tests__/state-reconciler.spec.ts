@@ -198,4 +198,61 @@ Current Task: implementation/T02-worker.md
 		expect(result.consistent).toBe(false)
 		expect(result.differences.map((difference) => difference.field)).toContain("implementation-artifacts")
 	})
+
+	it("reports an ownerless assignment when the canonical Owner is absent", async () => {
+		const fileSystem = createInMemoryFileSystem(files(README, DAG))
+		const logger = new RecordingHarnessLogger()
+
+		const result = await reconcilerFor(fileSystem, logger).reconcile(taskContext, runtimeState(), {
+			phase: "taskState.observe",
+			owner: { mode: null, agentTaskId: null, active: false },
+		})
+
+		expect(result.consistent).toBe(false)
+		expect(result.differences.map((difference) => difference.field)).toContain("assignment-owner")
+
+		const record = logger.byName("harness.state.reconcile")[0]
+		expect(record?.level).toBe("warn")
+		expect(record?.attributes).toMatchObject({
+			phase: "taskState.observe",
+			owner: { mode: null, agentTaskId: null, active: false },
+		})
+	})
+
+	it("reports an assignment whose owner is not active", async () => {
+		const fileSystem = createInMemoryFileSystem(files(README, DAG))
+		const logger = new RecordingHarnessLogger()
+
+		const result = await reconcilerFor(fileSystem, logger).reconcile(taskContext, runtimeState(), {
+			phase: "taskState.observe",
+			owner: { mode: "code", agentTaskId: "01a0ccee", active: false },
+		})
+
+		expect(result.differences.map((difference) => difference.field)).toContain("assignment-owner")
+	})
+
+	it("stays consistent when the assignment has an active owner", async () => {
+		const fileSystem = createInMemoryFileSystem(files(README, DAG))
+		const logger = new RecordingHarnessLogger()
+
+		const result = await reconcilerFor(fileSystem, logger).reconcile(taskContext, runtimeState(), {
+			phase: "taskState.observe",
+			owner: { mode: "code", agentTaskId: "01a0ccee", active: true },
+		})
+
+		expect(result.consistent).toBe(true)
+		expect(result.differences).toEqual([])
+	})
+
+	it("skips the owner check when no executor context is supplied", async () => {
+		const fileSystem = createInMemoryFileSystem(files(README, DAG))
+		const logger = new RecordingHarnessLogger()
+
+		const result = await reconcilerFor(fileSystem, logger).reconcile(taskContext, runtimeState(), {
+			phase: "scheduler.assignNext",
+		})
+
+		expect(result.consistent).toBe(true)
+		expect(result.differences).toEqual([])
+	})
 })

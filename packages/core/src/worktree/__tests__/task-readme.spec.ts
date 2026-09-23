@@ -6,6 +6,7 @@ import {
 	clearedFailureFields,
 	NO_FAILURE_ATTEMPTS,
 	NO_FAILURE_KEY,
+	NO_OWNER,
 	readmePath,
 	readCanonicalFields,
 	writeCanonicalFields,
@@ -24,25 +25,47 @@ Next Step: Start implementation.
 describe("canonical README block", () => {
 	it("reads canonical values regardless of casing and surrounding whitespace", () => {
 		const readme =
-			"protocol version: 2\n  status:   REVIEW_PASSED  \ncurrent task: NONE\nnext step: Ship it.\nfailure key: auth-token-expiry\nfailure attempts: 2\n"
+			"protocol version: 2\n  status:   REVIEW_PASSED  \ncurrent task: NONE\nowner: code#01a0ccee\nnext step: Ship it.\nfailure key: auth-token-expiry\nfailure attempts: 2\n"
 
 		expect(readCanonicalFields(readme)).toEqual({
 			status: "REVIEW_PASSED",
 			currentTask: "NONE",
+			owner: "code#01a0ccee",
 			nextStep: "Ship it.",
 			failureKey: "auth-token-expiry",
 			failureAttempts: "2",
 		})
 	})
 
-	it("reports missing failure fields as null", () => {
+	it("reports missing failure and owner fields as null", () => {
 		expect(readCanonicalFields(canonicalReadme)).toEqual({
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
+			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
 		})
+	})
+
+	it("inserts a missing Owner field after Status in canonical order", () => {
+		const updated = writeCanonicalFields(canonicalReadme, { Owner: "code#01a0ccee" })
+
+		expect(updated).toBe(`Protocol Version: 2
+Task: SITESUP-1116
+Status: READY_FOR_IMPLEMENTATION
+Owner: code#01a0ccee
+Current Task: NONE
+Next Step: Start implementation.
+`)
+	})
+
+	it("clears the Owner field with the canonical sentinel and preserves the rest", () => {
+		const readme = "Status: IMPLEMENTATION\nCurrent Task: implementation/T02-worker.md\nOwner: code#01a0ccee\n"
+		const updated = writeCanonicalFields(readme, { Owner: NO_OWNER })
+
+		expect(updated).toContain("Owner: NONE")
+		expect(updated).toContain("Current Task: implementation/T02-worker.md")
 	})
 
 	it("inserts a missing failure block after the Status anchor", () => {
@@ -122,6 +145,7 @@ describe("CanonicalReadmeWriter", () => {
 		expect(update.before).toEqual({
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
+			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
@@ -129,6 +153,7 @@ describe("CanonicalReadmeWriter", () => {
 		expect(update.after).toEqual({
 			status: "REVIEW_PASSED",
 			currentTask: "NONE",
+			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,

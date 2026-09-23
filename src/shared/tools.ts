@@ -103,6 +103,7 @@ export type NativeToolArgs = {
 	apply_patch: { patch: string }
 	list_files: { path: string; recursive?: boolean }
 	new_task: { mode: string; message: string; todos?: string }
+	approve_plan: { reason?: string }
 	ask_followup_question: {
 		question: string
 		follow_up: Array<{ text: string; mode?: string }>
@@ -284,6 +285,7 @@ export const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
 	attempt_completion: "complete tasks",
 	switch_mode: "switch modes",
 	new_task: "create new task",
+	approve_plan: "approve the plan",
 	codebase_search: "codebase search",
 	update_todo_list: "update todo list",
 	run_slash_command: "run slash command",
@@ -315,11 +317,19 @@ export const TOOL_GROUPS: Record<ToolGroup, ToolGroupConfig> = {
 }
 
 // Tools that are always available to all modes.
+//
+// `approve_plan` is listed here because the orchestrator has no tool groups of
+// its own (`groups: []`), so this list is the only mechanism that makes a tool
+// callable in it. It is *not* advertised to the model outside the orchestrator
+// mode: `filterNativeToolsForMode` removes it for every other mode, so stage
+// modes never see the harness-owned `PLAN_READY` exit. A call that arrives
+// anyway is answered by the tool's own status guard, not by a mode error.
 export const ALWAYS_AVAILABLE_TOOLS: ToolName[] = [
 	"ask_followup_question",
 	"attempt_completion",
 	"switch_mode",
 	"new_task",
+	"approve_plan",
 	"update_todo_list",
 	"run_slash_command",
 	"skill",
