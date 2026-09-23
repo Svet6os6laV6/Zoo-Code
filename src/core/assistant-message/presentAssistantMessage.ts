@@ -6,7 +6,13 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import type { ToolName, ClineAsk, ToolProgressStatus } from "@roo-code/types"
 import { ConsecutiveMistakeError, TelemetryEventName } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
-import { customToolRegistry, harnessLogger, TaskStateResolver, type TaskStatus } from "@roo-code/core"
+import {
+	customToolRegistry,
+	harnessLogger,
+	parseStageOutcome,
+	TaskStateResolver,
+	type TaskStatus,
+} from "@roo-code/core"
 
 import { t } from "../../i18n"
 
@@ -31,6 +37,7 @@ import { accessMcpResourceTool } from "../tools/accessMcpResourceTool"
 import { askFollowupQuestionTool } from "../tools/AskFollowupQuestionTool"
 import { switchModeTool } from "../tools/SwitchModeTool"
 import { attemptCompletionTool, AttemptCompletionCallbacks } from "../tools/AttemptCompletionTool"
+import { approvePlanTool } from "../tools/ApprovePlanTool"
 import { newTaskTool } from "../tools/NewTaskTool"
 import { updateTodoListTool } from "../tools/UpdateTodoListTool"
 import { runSlashCommandTool } from "../tools/RunSlashCommandTool"
@@ -41,7 +48,12 @@ import { isValidToolName, validateToolUse } from "../tools/validateToolUse"
 import { codebaseSearchTool } from "../tools/CodebaseSearchTool"
 import { parsePatch } from "../tools/apply-patch"
 
-import { evaluateArtifactMutationGate, type ArtifactMutationGateDecision } from "../harness/lifecycle-gate"
+import {
+	evaluateArtifactMutationGate,
+	evaluateUnitMutationGate,
+	type ArtifactMutationGateDecision,
+} from "../harness/lifecycle-gate"
+import { emitGateRejected } from "../harness/gate-telemetry"
 
 import { formatResponse } from "../prompts/responses"
 import { sanitizeToolUseId } from "../../utils/tool-id"
@@ -121,6 +133,10 @@ function mutationTargetPaths(block: ToolUse): string[] {
  * read is cheap and never stale). A task without a harness context — ordinary
  * work outside harness tasks — has no artifacts root to protect, so a failed
  * context or state resolution allows the mutation rather than blocking it.
+ *
+ * Two gates run per target: the harness-gate status gate (artifacts are
+ * read-only on PLAN_READY/BLOCKED) and the unit-mutation gate (a delegated
+ * stage child may only write its assigned unit during IMPLEMENTATION).
  */
 async function evaluateArtifactMutationGateForTask(cline: Task, block: ToolUse): Promise<ArtifactMutationGateDecision> {
 	if (!MUTATION_TOOL_NAMES.has(block.name)) {
@@ -134,19 +150,41 @@ async function evaluateArtifactMutationGateForTask(cline: Task, block: ToolUse):
 
 	let artifactsRoot: string
 	let status: TaskStatus
+	let assignedArtifact: string | null
+	let currentMode: string
 	try {
 		const context = await cline.getTaskContext()
 		artifactsRoot = context.taskRoot
-		status = (await new TaskStateResolver().resolve(context)).status
+		const state = await new TaskStateResolver().resolve(context)
+		status = state.status
+		assignedArtifact = state.currentTaskArtifact
+		currentMode = await cline.getTaskMode()
 	} catch {
 		return { allowed: true }
 	}
 
-	for (const relPath of targetPaths) {
-		const decision = evaluateArtifactMutationGate(path.resolve(cline.cwd, relPath), artifactsRoot, status)
+	const hasParentTask = Boolean(cline.parentTaskId)
 
-		if (!decision.allowed) {
-			return decision
+	for (const relPath of targetPaths) {
+		const targetPath = path.resolve(cline.cwd, relPath)
+
+		const statusDecision = evaluateArtifactMutationGate(targetPath, artifactsRoot, status)
+
+		if (!statusDecision.allowed) {
+			return statusDecision
+		}
+
+		const unitDecision = evaluateUnitMutationGate({
+			targetPath,
+			artifactsRoot,
+			status,
+			assignedArtifact,
+			hasParentTask,
+			currentMode,
+		})
+
+		if (!unitDecision.allowed) {
+			return unitDecision
 		}
 	}
 
@@ -169,13 +207,26 @@ async function emitToolCallRecord(cline: Task, block: ToolUse, startedAt: number
 	try {
 		const harnessContext = await cline.getHarnessLogContext()
 
+		const attributes: Record<string, unknown> = {
+			tool: block.name,
+			durationMs: Date.now() - startedAt,
+			partial: false,
+		}
+
+		// A stage reports its outcome in the completion text. Only the recognised
+		// marker is recorded — never the result text itself — so the log stays
+		// metadata-only while still attributing the outcome to the unit.
+		if (block.name === "attempt_completion") {
+			const stageOutcome = parseStageOutcome(harnessContext.mode ?? "", block.params.result ?? "")
+
+			if (stageOutcome) {
+				attributes.stageResult = stageOutcome.result
+			}
+		}
+
 		harnessLogger().event("harness.tool.call", {
-			context: { ...harnessContext, txxId: null },
-			attributes: {
-				tool: block.name,
-				durationMs: Date.now() - startedAt,
-				partial: false,
-			},
+			context: harnessContext,
+			attributes,
 		})
 	} catch {
 		// Observability must never break tool execution.
@@ -515,6 +566,8 @@ export async function presentAssistantMessage(cline: Task) {
 						return `[${block.name} for '${block.params.artifact_id}']`
 					case "update_todo_list":
 						return `[${block.name}]`
+					case "approve_plan":
+						return `[${block.name}]`
 					case "new_task": {
 						const mode = block.params.mode ?? defaultModeSlug
 						const message = block.params.message ?? "(no message)"
@@ -853,6 +906,7 @@ export async function presentAssistantMessage(cline: Task) {
 			const mutationGate = await evaluateArtifactMutationGateForTask(cline, block)
 
 			if (!mutationGate.allowed) {
+				await emitGateRejected(() => cline.getHarnessLogContext(), mutationGate.gate, mutationGate.reason)
 				pushToolResult(formatResponse.toolError(mutationGate.reason))
 				await emitToolCallRecord(cline, block, toolCallStartedAt)
 				break
@@ -993,6 +1047,13 @@ export async function presentAssistantMessage(cline: Task) {
 						handleError,
 						pushToolResult,
 						toolCallId: block.id,
+					})
+					break
+				case "approve_plan":
+					await approvePlanTool.handle(cline, block as ToolUse<"approve_plan">, {
+						askApproval,
+						handleError,
+						pushToolResult,
 					})
 					break
 				case "attempt_completion": {

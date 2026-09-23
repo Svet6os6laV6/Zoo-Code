@@ -13,6 +13,7 @@ import { BaseTool, ToolCallbacks } from "./BaseTool"
 import type { ToolUse } from "../../shared/tools"
 import { sanitizeToolUseId } from "../../utils/tool-id"
 import { evaluateStageLaunchGate, isStageMode, type StageLaunchGateDecision } from "../harness/lifecycle-gate"
+import { emitGateRejected } from "../harness/gate-telemetry"
 
 interface NewTaskParams {
 	mode: string
@@ -126,6 +127,7 @@ export class NewTaskTool extends BaseTool<"new_task"> {
 				const gate = await evaluateStageLaunchGateForTask(task, mode)
 
 				if (!gate.allowed) {
+					await emitGateRejected(() => task.getHarnessLogContext(), gate.gate, gate.reason)
 					pushToolResult(formatResponse.toolError(gate.reason))
 					return
 				}

@@ -2,7 +2,7 @@ import type OpenAI from "openai"
 import type { ModeConfig, ToolName, ToolGroup, ModelInfo } from "@roo-code/types"
 import { getModeBySlug, getToolsForMode } from "../../../shared/modes"
 import { TOOL_GROUPS, ALWAYS_AVAILABLE_TOOLS, TOOL_ALIASES } from "../../../shared/tools"
-import { defaultModeSlug } from "../../../shared/modes"
+import { defaultModeSlug, orchestratorModeSlug } from "../../../shared/modes"
 import type { CodeIndexManager } from "../../../services/code-index/manager"
 import type { McpHub } from "../../../services/mcp/McpHub"
 import { isToolAllowedForMode } from "../../../core/tools/validateToolUse"
@@ -293,6 +293,16 @@ export function filterNativeToolsForMode(
 	// Conditionally exclude run_slash_command if experiment is not enabled
 	if (!experiments?.runSlashCommand) {
 		allowedToolNames.delete("run_slash_command")
+	}
+
+	// `approve_plan` is the orchestrator's explicit signal that leaves the
+	// harness-owned `PLAN_READY` gate; a stage mode must not be offered it, and
+	// neither must an ordinary mode. The tool stays callable everywhere
+	// (`validateToolUse` allows always-available tools), so a call that arrives
+	// anyway is answered by the tool's own status guard instead of a mode error —
+	// only the *description* is restricted to the orchestrator.
+	if (modeSlug !== orchestratorModeSlug) {
+		allowedToolNames.delete("approve_plan")
 	}
 
 	// Remove tools that are explicitly disabled via the disabledTools setting

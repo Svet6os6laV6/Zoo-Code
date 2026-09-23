@@ -373,3 +373,103 @@ describe("HarnessModeRunner.approvePlan", () => {
 		expect(run).not.toHaveBeenCalled()
 	})
 })
+
+/**
+ * Minimal in-memory filesystem shared by `TaskStateResolver`, `TaskScheduler` and
+ * `ModeRunner`, so all three read one filesystem moment (the README and the
+ * `implementation/` snapshot the approval acts on).
+ */
+function inMemoryFileSystem(initial: Record<string, string>) {
+	const files = new Map<string, string>(Object.entries(initial))
+
+	return {
+		files,
+		readFile: async (filePath: string) => {
+			const content = files.get(filePath)
+			if (content === undefined) throw Object.assign(new Error(`ENOENT: ${filePath}`), { code: "ENOENT" })
+			return content
+		},
+		readdir: async (dirPath: string) => {
+			const prefix = `${dirPath}${path.sep}`
+			const entries = [...files.keys()]
+				.filter((filePath) => filePath.startsWith(prefix))
+				.map((filePath) => filePath.slice(prefix.length))
+			if (entries.length === 0) throw Object.assign(new Error(`ENOENT: ${dirPath}`), { code: "ENOENT" })
+			return entries
+		},
+		writeFile: async (filePath: string, data: string) => {
+			files.set(filePath, data)
+		},
+		rename: async (oldPath: string, newPath: string) => {
+			const content = files.get(oldPath)
+			if (content === undefined) throw Object.assign(new Error(`ENOENT: ${oldPath}`), { code: "ENOENT" })
+			files.delete(oldPath)
+			files.set(newPath, content)
+		},
+	}
+}
+
+describe("HarnessModeRunner.approvePlan — full chain", () => {
+	const taskRoot = path.join("/workspace", ".roo", "tasks", "SITESUP-1116")
+	const readmePath = path.join(taskRoot, "README.md")
+	const planReadyReadme = "Protocol Version: 2\nTask: SITESUP-1116\nStatus: PLAN_READY\nCurrent Task: NONE\n"
+
+	function unitFile(name: string, content: string): [string, string] {
+		return [path.join(taskRoot, "implementation", name), content]
+	}
+
+	/**
+	 * The whole chain over one fixture: the same real `LifecycleController`,
+	 * `ModeRunner` and `TaskScheduler` the harness runs, with `startMode` replaced
+	 * by a recorder. Approving the plan must open the Code child of the first ready
+	 * unit, which is the entry point the automatic cycle needs (T02).
+	 */
+	function fixture(units: Array<[string, string]>) {
+		const fileSystem = inMemoryFileSystem(Object.fromEntries([[readmePath, planReadyReadme], ...units]))
+		const starts: Array<{ mode: string; message: string }> = []
+		const startMode = async (mode: string, message: string) => {
+			starts.push({ mode, message })
+		}
+		const runner = new HarnessModeRunner(startMode, {
+			stateResolver: new TaskStateResolver(fileSystem),
+			controller: new LifecycleController(),
+			modeRunner: new ModeRunner(startMode, new TaskScheduler(fileSystem), fileSystem),
+		})
+
+		return { fileSystem, runner, starts }
+	}
+
+	it("approves PLAN_READY and starts Code on the first ready unit", async () => {
+		const { fileSystem, runner, starts } = fixture([
+			unitFile("T01-first.md", "## Status\nStatus: TODO\n"),
+			unitFile("T02-second.md", "## Status\nStatus: TODO\n\n## Relationships\n\n- Depends on: T01\n"),
+		])
+
+		const result = await runner.approvePlan({
+			getTaskContext: vi.fn().mockResolvedValue({ ...context, taskRoot }),
+		})
+
+		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+		expect(starts.map((start) => start.mode)).toEqual(["code"])
+		expect(starts[0]?.message).toContain("implementation/T01-first.md")
+
+		// The canonical state the next session reads: the unit is assigned.
+		expect(fileSystem.files.get(readmePath)).toContain("Status: IMPLEMENTATION")
+		expect(fileSystem.files.get(readmePath)).toContain("Current Task: implementation/T01-first.md")
+	})
+
+	it("starts Refactor when every unit is already done", async () => {
+		const { fileSystem, runner, starts } = fixture([
+			unitFile("T01-first.md", "## Status\nStatus: DONE\n"),
+			unitFile("T02-second.md", "## Status\nStatus: DONE\n"),
+		])
+
+		const result = await runner.approvePlan({
+			getTaskContext: vi.fn().mockResolvedValue({ ...context, taskRoot }),
+		})
+
+		expect(result).toEqual({ type: "started", mode: "refactor", status: "READY_FOR_REFACTOR" })
+		expect(starts.map((start) => start.mode)).toEqual(["refactor"])
+		expect(fileSystem.files.get(readmePath)).toContain("Status: READY_FOR_REFACTOR")
+	})
+})

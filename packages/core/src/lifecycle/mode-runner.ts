@@ -18,7 +18,9 @@
 import { promises as fs } from "fs"
 import * as path from "path"
 
-import type { CanonicalReadmeFields, ReadmeFileSystem } from "../worktree/task-readme.js"
+import { harnessLogger } from "../observability/harness-logger.js"
+import type { HarnessLoggerPort } from "../observability/types.js"
+import type { CanonicalReadmeFields, CanonicalReadmeUpdate, ReadmeFileSystem } from "../worktree/task-readme.js"
 import {
 	CanonicalReadmeError,
 	CanonicalReadmeWriter,
@@ -45,6 +47,18 @@ import { buildStageInstruction } from "./stage-instructions.js"
 type StartMode = (mode: LifecycleMode, message: string) => Promise<void>
 
 /**
+ * Why a canonical status write happened, carried into the mutation record.
+ *
+ * `decision` is the `LifecycleResult` variant that produced the write and
+ * `reason` the human-readable cause, so a log reader can reconstruct "why did
+ * the status change" without replaying the controller.
+ */
+type TransitionJournal = {
+	readonly decision: LifecycleResult["type"]
+	readonly reason: string
+}
+
+/**
  * The assigned unit as a task-relative path, or `null` when no unit is assigned.
  *
  * Task-relative (not workspace-relative) keeps the instruction independent of the
@@ -66,6 +80,8 @@ export class ModeRunner {
 		private readonly startMode: StartMode,
 		private readonly scheduler: Pick<TaskScheduler, "assignNext" | "plan"> = new TaskScheduler(),
 		fileSystem: ReadmeFileSystem = fs,
+		/** Explicit injection for tests; defaults to the process-wide harness logger. */
+		private readonly logger?: HarnessLoggerPort,
 	) {
 		this.fileSystem = fileSystem
 		this.readme = new CanonicalReadmeWriter(fileSystem)
@@ -77,11 +93,17 @@ export class ModeRunner {
 				return decision
 
 			case "stop":
-				await this.writeState(context, decision.status, decision.failure)
+				await this.writeState(context, decision.status, decision.failure, {
+					decision: decision.type,
+					reason: decision.reason,
+				})
 				return { type: "stopped", status: decision.status, reason: decision.reason }
 
 			case "start_mode":
-				await this.writeState(context, decision.status, decision.failure)
+				await this.writeState(context, decision.status, decision.failure, {
+					decision: decision.type,
+					reason: `started the ${decision.mode} stage`,
+				})
 				await this.startMode(
 					decision.mode,
 					buildStageInstruction({
@@ -99,7 +121,7 @@ export class ModeRunner {
 					return this.startCode(context, assignment.relativeArtifact)
 				}
 
-				return this.startRefactorOrInvalid(context)
+				return this.startRefactorOrInvalid(context, decision.type)
 			}
 
 			case "reschedule_implementation":
@@ -111,13 +133,19 @@ export class ModeRunner {
 				// Condition. Nothing is assigned while blocked, so the park and the
 				// reschedule loop guard are no-ops on resume.
 				if (state.currentTaskArtifact) {
-					await parkImplementationTask(this.fileSystem, state.currentTaskArtifact)
+					await parkImplementationTask(this.fileSystem, state.currentTaskArtifact, this.logger)
 				}
 
 				// Clear the assignment. `READY_FOR_IMPLEMENTATION` + `Current Task: NONE`
 				// is a canonical, resumable state, so even a failure below leaves the
 				// task recoverable instead of stuck at BLOCKED.
-				await this.writeState(context, decision.status)
+				await this.writeState(context, decision.status, undefined, {
+					decision: decision.type,
+					reason:
+						decision.type === "reschedule_implementation"
+							? "parked the assigned unit and recomputed the DAG"
+							: "resumed the task and recomputed the DAG",
+				})
 
 				const plan = await this.scheduler.plan(context)
 
@@ -139,7 +167,7 @@ export class ModeRunner {
 					return this.startCode(context, assignment.relativeArtifact)
 				}
 
-				return this.startRefactorOrInvalid(context)
+				return this.startRefactorOrInvalid(context, decision.type)
 			}
 
 			default:
@@ -157,10 +185,16 @@ export class ModeRunner {
 	 * The DAG has no ready unit left: start Refactor when every unit is done,
 	 * otherwise report `invalid` so the caller falls back to the legacy resume.
 	 */
-	private async startRefactorOrInvalid(context: TaskContext): Promise<ModeRunResult> {
+	private async startRefactorOrInvalid(
+		context: TaskContext,
+		decision: LifecycleResult["type"],
+	): Promise<ModeRunResult> {
 		const plan = await this.scheduler.plan(context)
 		if (plan.artifacts.tasks.length > 0 && plan.done.length === plan.artifacts.tasks.length) {
-			await this.writeState(context, "READY_FOR_REFACTOR")
+			await this.writeState(context, "READY_FOR_REFACTOR", undefined, {
+				decision,
+				reason: "every implementation unit is done; starting Refactor",
+			})
 			await this.startMode(
 				"refactor",
 				buildStageInstruction({ mode: "refactor", taskId: context.taskId, assignedArtifact: null }),
@@ -181,7 +215,12 @@ export class ModeRunner {
 	 * otherwise, which keeps the README pointing at the finding currently being
 	 * remediated — or at nothing when the loop has ended.
 	 */
-	private async writeState(context: TaskContext, status: TaskStatus, failure?: FailureTracking): Promise<void> {
+	private async writeState(
+		context: TaskContext,
+		status: TaskStatus,
+		failure?: FailureTracking,
+		journal?: TransitionJournal,
+	): Promise<void> {
 		const readme = await this.fileSystem.readFile(readmePath(context.taskRoot), "utf8")
 		const current = readCanonicalFields(readme)
 		const fields: CanonicalReadmeFields = {}
@@ -219,13 +258,41 @@ export class ModeRunner {
 			return
 		}
 
+		let update: CanonicalReadmeUpdate
 		try {
-			await this.readme.update(context.taskRoot, fields)
+			update = await this.readme.update(context.taskRoot, fields)
 		} catch (error) {
 			if (error instanceof CanonicalReadmeError) {
 				throw new LifecycleError(error.message)
 			}
 			throw error
+		}
+
+		if (journal) {
+			this.journalTransition(context, update, journal)
+		}
+	}
+
+	/**
+	 * Record the canonical status write as a mutation.
+	 *
+	 * `stateBefore`/`stateAfter` come from the writer's own read-modify-write, so
+	 * they describe one filesystem moment instead of two independent reads. The
+	 * record is best-effort: a logger failure must never undo a status write that
+	 * already succeeded, so it is swallowed exactly like `reportArtifactChanges`.
+	 */
+	private journalTransition(context: TaskContext, update: CanonicalReadmeUpdate, journal: TransitionJournal): void {
+		try {
+			harnessLogger(this.logger).mutation("harness.lifecycle.transition", {
+				target: update.filePath,
+				stateBefore: update.before,
+				stateAfter: update.after,
+				reason: journal.reason,
+				attributes: { decision: journal.decision },
+				context: { taskId: context.taskId },
+			})
+		} catch {
+			// Journaling is diagnostic only; the status write already happened.
 		}
 	}
 

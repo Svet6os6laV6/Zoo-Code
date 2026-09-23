@@ -40,10 +40,12 @@ vi.mock("@roo-code/telemetry", () => ({
 }))
 
 const runHarnessLifecycle = vi.hoisted(() => vi.fn().mockResolvedValue(null))
+const continueHarnessLifecycle = vi.hoisted(() => vi.fn().mockResolvedValue(null))
 
 vi.mock("../core/harness/mode-runner", () => ({
 	HarnessModeRunner: class {
 		run = runHarnessLifecycle
+		continue = continueHarnessLifecycle
 	},
 }))
 
@@ -136,6 +138,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
 		runHarnessLifecycle.mockResolvedValue(null)
+		continueHarnessLifecycle.mockResolvedValue(null)
 	})
 
 	it("starts the controller-selected mode instead of resuming the orchestrator", async () => {
@@ -186,6 +189,202 @@ describe("History resume delegation - parent metadata transitions", () => {
 		})
 		expect(schedule).not.toHaveBeenCalled()
 		expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
+	})
+
+	it("falls back to the state-only continue when a stage-child finishes without a stage marker", async () => {
+		const parentItem = {
+			id: "parent-fallback",
+			status: "delegated",
+			awaitingChildId: "child-fallback",
+			childIds: ["child-fallback"],
+			ts: 100,
+			task: "Parent fallback task",
+			tokensIn: 0,
+			tokensOut: 0,
+			totalCost: 0,
+		}
+		const childItem = { id: "child-fallback", status: "active", mode: "code" }
+		const taskHistoryStore = makeTaskHistoryStoreStub(childItem, parentItem)
+		const parentInstance = {
+			taskId: parentItem.id,
+			resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+			overwriteClineMessages: vi.fn().mockResolvedValue(undefined),
+			overwriteApiConversationHistory: vi.fn().mockResolvedValue(undefined),
+		}
+		let currentTask: object | undefined = { taskId: childItem.id }
+		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
+		const provider = makeProviderStub({
+			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
+			getCurrentTask: vi.fn(() => currentTask),
+			removeClineFromStack: vi.fn(async () => {
+				currentTask = undefined
+			}),
+			createTaskWithHistoryItem: vi.fn(async () => (currentTask = parentInstance)),
+			emit: vi.fn(),
+			taskHistoryStore,
+			taskScheduler: { schedule },
+		})
+		// The child finished without an unambiguous stage marker, so `run` cannot route.
+		runHarnessLifecycle.mockResolvedValueOnce(null)
+		continueHarnessLifecycle.mockResolvedValueOnce({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+
+		const result = await ClineProvider.prototype.reopenParentFromDelegation.call(provider, {
+			parentTaskId: parentItem.id,
+			childTaskId: childItem.id,
+			completionResultSummary: "Unit done, no stage marker",
+		})
+
+		expect(result).toBe(true)
+		expect(continueHarnessLifecycle).toHaveBeenCalledWith(parentInstance, { requirePlanApproval: true })
+		expect(schedule).not.toHaveBeenCalled()
+		expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
+	})
+
+	it("continues the chain for a cancelled stage-child that was resumed and finished without a stage marker", async () => {
+		const parentItem = {
+			id: "parent-cancelled",
+			status: "delegated",
+			awaitingChildId: "child-cancelled",
+			childIds: ["child-cancelled"],
+			ts: 100,
+			task: "Parent cancelled task",
+			tokensIn: 0,
+			tokensOut: 0,
+			totalCost: 0,
+		}
+		// cancelTask() leaves the child "interrupted" and the parent delegated; the user
+		// resumes the child, which then finishes without a stage marker.
+		const childItem = { id: "child-cancelled", status: "interrupted", mode: "code" }
+		const taskHistoryStore = makeTaskHistoryStoreStub(childItem, parentItem)
+		const parentInstance = {
+			taskId: parentItem.id,
+			resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+			overwriteClineMessages: vi.fn().mockResolvedValue(undefined),
+			overwriteApiConversationHistory: vi.fn().mockResolvedValue(undefined),
+		}
+		let currentTask: object | undefined = { taskId: childItem.id }
+		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
+		const provider = makeProviderStub({
+			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
+			getCurrentTask: vi.fn(() => currentTask),
+			removeClineFromStack: vi.fn(async () => {
+				currentTask = undefined
+			}),
+			createTaskWithHistoryItem: vi.fn(async () => (currentTask = parentInstance)),
+			emit: vi.fn(),
+			taskHistoryStore,
+			taskScheduler: { schedule },
+		})
+		runHarnessLifecycle.mockResolvedValueOnce(null)
+		continueHarnessLifecycle.mockResolvedValueOnce({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+
+		const result = await ClineProvider.prototype.reopenParentFromDelegation.call(provider, {
+			parentTaskId: parentItem.id,
+			childTaskId: childItem.id,
+			completionResultSummary: "Resumed child finished",
+		})
+
+		expect(result).toBe(true)
+		expect(continueHarnessLifecycle).toHaveBeenCalledWith(parentInstance, { requirePlanApproval: true })
+		expect(schedule).not.toHaveBeenCalled()
+		expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
+	})
+
+	it("keeps the legacy resume when neither the stage outcome nor the canonical state can route", async () => {
+		const parentItem = {
+			id: "parent-legacy",
+			status: "delegated",
+			awaitingChildId: "child-legacy",
+			childIds: ["child-legacy"],
+			ts: 100,
+			task: "Parent legacy task",
+			tokensIn: 0,
+			tokensOut: 0,
+			totalCost: 0,
+		}
+		const childItem = { id: "child-legacy", status: "active", mode: "code" }
+		const taskHistoryStore = makeTaskHistoryStoreStub(childItem, parentItem)
+		const parentInstance = {
+			taskId: parentItem.id,
+			resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+			overwriteClineMessages: vi.fn().mockResolvedValue(undefined),
+			overwriteApiConversationHistory: vi.fn().mockResolvedValue(undefined),
+		}
+		let currentTask: object | undefined = { taskId: childItem.id }
+		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
+		const provider = makeProviderStub({
+			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
+			getCurrentTask: vi.fn(() => currentTask),
+			removeClineFromStack: vi.fn(async () => {
+				currentTask = undefined
+			}),
+			createTaskWithHistoryItem: vi.fn(async () => (currentTask = parentInstance)),
+			emit: vi.fn(),
+			taskHistoryStore,
+			taskScheduler: { schedule },
+		})
+		runHarnessLifecycle.mockResolvedValueOnce(null)
+		continueHarnessLifecycle.mockResolvedValueOnce(null)
+
+		const result = await ClineProvider.prototype.reopenParentFromDelegation.call(provider, {
+			parentTaskId: parentItem.id,
+			childTaskId: childItem.id,
+			completionResultSummary: "Nothing to route",
+		})
+
+		expect(result).toBe(true)
+		expect(continueHarnessLifecycle).toHaveBeenCalledWith(parentInstance, { requirePlanApproval: true })
+		await vi.waitFor(() => expect(parentInstance.resumeAfterDelegation).toHaveBeenCalledTimes(1))
+	})
+
+	it("does not attempt the state-only continue for a non-lifecycle child mode", async () => {
+		const parentItem = {
+			id: "parent-nonlifecycle",
+			status: "delegated",
+			awaitingChildId: "child-nonlifecycle",
+			childIds: ["child-nonlifecycle"],
+			ts: 100,
+			task: "Parent non-lifecycle task",
+			tokensIn: 0,
+			tokensOut: 0,
+			totalCost: 0,
+		}
+		const childItem = { id: "child-nonlifecycle", status: "active", mode: "debug" }
+		const taskHistoryStore = makeTaskHistoryStoreStub(childItem, parentItem)
+		const parentInstance = {
+			taskId: parentItem.id,
+			resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+			overwriteClineMessages: vi.fn().mockResolvedValue(undefined),
+			overwriteApiConversationHistory: vi.fn().mockResolvedValue(undefined),
+		}
+		let currentTask: object | undefined = { taskId: childItem.id }
+		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
+		const provider = makeProviderStub({
+			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
+			getCurrentTask: vi.fn(() => currentTask),
+			removeClineFromStack: vi.fn(async () => {
+				currentTask = undefined
+			}),
+			createTaskWithHistoryItem: vi.fn(async () => (currentTask = parentInstance)),
+			emit: vi.fn(),
+			taskHistoryStore,
+			taskScheduler: { schedule },
+		})
+		runHarnessLifecycle.mockResolvedValueOnce(null)
+
+		const result = await ClineProvider.prototype.reopenParentFromDelegation.call(provider, {
+			parentTaskId: parentItem.id,
+			childTaskId: childItem.id,
+			completionResultSummary: "Debug child finished",
+		})
+
+		expect(result).toBe(true)
+		expect(continueHarnessLifecycle).not.toHaveBeenCalled()
+		await vi.waitFor(() => expect(parentInstance.resumeAfterDelegation).toHaveBeenCalledTimes(1))
 	})
 
 	it("rejects a stale restored completion action before changing parent or child state", async () => {

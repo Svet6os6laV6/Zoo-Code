@@ -47,6 +47,15 @@ export const modes = DEFAULT_MODES
 // Export the default mode slug
 export const defaultModeSlug = modes[0].slug
 
+/**
+ * The mode that may approve a plan (`approve_plan`).
+ *
+ * `PLAN_READY` is a harness-owned gate, and the orchestrator is the chain owner
+ * that may leave it on the user's behalf. Stage modes must not see the tool, so
+ * this slug is the single place that condition is expressed.
+ */
+export const orchestratorModeSlug = "orchestrator"
+
 // Helper functions
 export function getModeBySlug(slug: string, customModes?: ModeConfig[]): ModeConfig | undefined {
 	// Check custom modes first

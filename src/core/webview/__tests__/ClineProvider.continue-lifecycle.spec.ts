@@ -175,6 +175,22 @@ describe("ClineProvider.continueTaskLifecycle", () => {
 		expect(continueHarness).not.toHaveBeenCalled()
 	})
 
+	it("advances the canonical state for a non-lifecycle chain owner on the state-only path", async () => {
+		const { provider, task } = makeProvider({ mode: "orchestrator" })
+
+		expect(await provider.continueTaskLifecycle(task as unknown as Task)).toBe(true)
+		expect(continueHarness).toHaveBeenCalledWith(task, { requirePlanApproval: true })
+		expect(runHarness).not.toHaveBeenCalled()
+	})
+
+	it("declines a non-lifecycle mode on the stage-outcome path", async () => {
+		const { provider, task } = makeProvider({ mode: "orchestrator" })
+
+		expect(await provider.continueTaskLifecycle(task as unknown as Task, "Stage Result: COMPLETED")).toBe(false)
+		expect(runHarness).not.toHaveBeenCalled()
+		expect(continueHarness).not.toHaveBeenCalled()
+	})
+
 	it("declines when a delegated stage is already in flight", async () => {
 		const { provider, task } = makeProvider({ history: { id: "SITESUP-1119", status: "delegated" } })
 
@@ -285,6 +301,9 @@ describe("ClineProvider.continueTaskLifecycleFromCommand", () => {
 
 	it("reports that the lifecycle is unchanged when it cannot advance", async () => {
 		const { provider } = makeProvider({ mode: "debug" })
+		// The state-only path consults the runner for any mode; "unchanged" is the
+		// runner's own verdict, not the provider's mode check.
+		continueHarness.mockResolvedValue(null)
 
 		await provider.continueTaskLifecycleFromCommand()
 
@@ -381,5 +400,66 @@ describe("ClineProvider.approvePlanTask", () => {
 
 		expect(showErrorMessage).toHaveBeenCalledWith("Could not read the task lifecycle state.")
 		expect(approveHarness).not.toHaveBeenCalled()
+	})
+})
+
+describe("ClineProvider.approvePlanForTask", () => {
+	beforeEach(() => {
+		vi.clearAllMocks()
+		approveHarness.mockResolvedValue({ type: "started", mode: "code", status: "IMPLEMENTATION" })
+		// Only the post-approval read happens here: the provider defers the
+		// `PLAN_READY` guard to the harness and reports where the task landed.
+		resolveState.mockResolvedValue({ ...planReadyState("IMPLEMENTATION"), currentTask: "implementation/T01-x.md" })
+	})
+
+	it("approves the caller's task without any modal confirmation", async () => {
+		const { provider, task } = makeProvider({ mode: "orchestrator" })
+
+		const outcome = await provider.approvePlanForTask(task as unknown as Task)
+
+		expect(approveHarness).toHaveBeenCalledWith(task)
+		expect(outcome).toEqual({
+			approved: true,
+			status: "IMPLEMENTATION",
+			currentTask: "implementation/T01-x.md",
+			reason: null,
+		})
+		// The tool call already carried the user's decision: no second prompt.
+		expect(showWarningMessage).not.toHaveBeenCalled()
+		expect(showInformationMessage).not.toHaveBeenCalled()
+		expect(showErrorMessage).not.toHaveBeenCalled()
+	})
+
+	it("reports that the task was left unchanged when the harness declines", async () => {
+		const { provider, task } = makeProvider({ mode: "orchestrator" })
+		approveHarness.mockResolvedValue(null)
+
+		const outcome = await provider.approvePlanForTask(task as unknown as Task)
+
+		expect(outcome.approved).toBe(false)
+		expect(outcome.status).toBeNull()
+		expect(outcome.reason).toContain("PLAN_READY")
+		expect(showWarningMessage).not.toHaveBeenCalled()
+	})
+
+	it("turns a routing failure into a reported reason instead of throwing", async () => {
+		const { provider, task } = makeProvider({ mode: "orchestrator" })
+		approveHarness.mockRejectedValue(new Error("boom"))
+
+		const outcome = await provider.approvePlanForTask(task as unknown as Task)
+
+		expect(outcome.approved).toBe(false)
+		expect(outcome.reason).toContain("boom")
+		expect(provider.log).toHaveBeenCalledWith(expect.stringContaining("approvePlanForTask"))
+	})
+
+	it("still approves when the assigned unit cannot be read", async () => {
+		const { provider, task } = makeProvider({ mode: "orchestrator" })
+		resolveState.mockRejectedValue(new Error("state unreadable"))
+
+		const outcome = await provider.approvePlanForTask(task as unknown as Task)
+
+		expect(outcome.approved).toBe(true)
+		expect(outcome.currentTask).toBeNull()
 	})
 })

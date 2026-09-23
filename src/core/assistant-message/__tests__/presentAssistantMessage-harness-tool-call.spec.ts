@@ -19,6 +19,11 @@ vi.mock("../../tools/ReadFileTool", () => ({
 		getReadFileToolDescription: vi.fn(() => "[read_file]"),
 	},
 }))
+vi.mock("../../tools/AttemptCompletionTool", () => ({
+	attemptCompletionTool: {
+		handle: vi.fn().mockResolvedValue(undefined),
+	},
+}))
 vi.mock("@roo-code/telemetry", () => ({
 	TelemetryService: {
 		instance: {
@@ -28,15 +33,21 @@ vi.mock("@roo-code/telemetry", () => ({
 		},
 	},
 }))
-vi.mock("@roo-code/core", () => ({
-	customToolRegistry: {
-		has: vi.fn(() => false),
-		get: vi.fn(),
-	},
-	harnessLogger: () => ({
-		event: mockHarnessEvent,
-	}),
-}))
+// Keep the real `parseStageOutcome` so the stage-result attribute is exercised
+// against the production parser rather than a test double.
+vi.mock("@roo-code/core", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@roo-code/core")>()
+	return {
+		...actual,
+		customToolRegistry: {
+			has: vi.fn(() => false),
+			get: vi.fn(),
+		},
+		harnessLogger: () => ({
+			event: mockHarnessEvent,
+		}),
+	}
+})
 
 interface MockTask {
 	taskId: string
@@ -94,7 +105,9 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 			recordToolUsage: vi.fn(),
 			recordToolError: vi.fn(),
 			getTaskMode: vi.fn().mockResolvedValue("code"),
-			getHarnessLogContext: vi.fn().mockResolvedValue({ taskId: "test-task-id", traceId: "trace-1" }),
+			getHarnessLogContext: vi
+				.fn()
+				.mockResolvedValue({ taskId: "test-task-id", traceId: "trace-1", mode: "code", txxId: "T06" }),
 			toolRepetitionDetector: {
 				check: vi.fn().mockReturnValue({ allowExecution: true }),
 			},
@@ -174,5 +187,74 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 		const attributes = mockHarnessEvent.mock.calls[0][1].attributes
 		expect(Number.isFinite(attributes.durationMs)).toBe(true)
 		expect(attributes.durationMs).toBeGreaterThanOrEqual(0)
+	})
+
+	it("attributes the tool call to the unit from the harness context", async () => {
+		mockTask.assistantMessageContent = [
+			{
+				type: "tool_use",
+				id: "tool_call_complete_456",
+				name: "read_file",
+				params: { path: "test.txt" },
+				nativeArgs: { path: "test.txt" },
+				partial: false,
+			},
+		]
+
+		await presentAssistantMessage(mockTask as unknown as Task)
+
+		expect(mockHarnessEvent).toHaveBeenCalledWith(
+			"harness.tool.call",
+			expect.objectContaining({
+				context: expect.objectContaining({ txxId: "T06" }),
+			}),
+		)
+	})
+
+	it("records the recognised stage result for a completed attempt_completion", async () => {
+		mockTask.assistantMessageContent = [
+			{
+				type: "tool_use",
+				id: "tool_call_completion_1",
+				name: "attempt_completion",
+				params: { result: "Unit finished.\nStage Result: COMPLETED" },
+				nativeArgs: { result: "Unit finished.\nStage Result: COMPLETED" },
+				partial: false,
+			},
+		]
+
+		await presentAssistantMessage(mockTask as unknown as Task)
+
+		expect(mockHarnessEvent).toHaveBeenCalledWith(
+			"harness.tool.call",
+			expect.objectContaining({
+				attributes: expect.objectContaining({
+					tool: "attempt_completion",
+					stageResult: "COMPLETED",
+				}),
+			}),
+		)
+
+		// Only the recognised marker is recorded — never the result text.
+		expect(JSON.stringify(mockHarnessEvent.mock.calls)).not.toContain("Unit finished.")
+	})
+
+	it("omits stageResult when the completion carries no recognised marker", async () => {
+		mockTask.assistantMessageContent = [
+			{
+				type: "tool_use",
+				id: "tool_call_completion_2",
+				name: "attempt_completion",
+				params: { result: "Just a summary with no marker." },
+				nativeArgs: { result: "Just a summary with no marker." },
+				partial: false,
+			},
+		]
+
+		await presentAssistantMessage(mockTask as unknown as Task)
+
+		expect(mockHarnessEvent).toHaveBeenCalledTimes(1)
+		const attributes = mockHarnessEvent.mock.calls[0][1].attributes
+		expect(attributes).not.toHaveProperty("stageResult")
 	})
 })

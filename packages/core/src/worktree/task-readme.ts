@@ -19,6 +19,14 @@ export const README_FILENAME = "README.md"
 /** Canonical value declaring that no implementation unit is assigned. */
 export const NO_CURRENT_TASK = "NONE"
 
+/**
+ * Canonical value declaring that no executor currently holds the assignment
+ * lease. The `Owner` field is diagnostic only: it records which task is running
+ * the assigned unit so `StateReconciler` can flag an assignment with no active
+ * owner. It never participates in lifecycle routing.
+ */
+export const NO_OWNER = "NONE"
+
 /** Canonical value declaring that no failure is currently being remediated. */
 export const NO_FAILURE_KEY = "NONE"
 
@@ -33,6 +41,7 @@ export const NO_FAILURE_ATTEMPTS = "0"
 export const CANONICAL_README_FIELDS = [
 	"Status",
 	"Current Task",
+	"Owner",
 	"Next Step",
 	"Failure Key",
 	"Failure Attempts",
@@ -47,6 +56,8 @@ export type CanonicalReadmeFields = Partial<Record<CanonicalReadmeField, string>
 export type CanonicalReadmeSnapshot = {
 	readonly status: string | null
 	readonly currentTask: string | null
+	/** Executor lease (`<mode>#<agentTaskId>`), or `null` when the field is absent. */
+	readonly owner: string | null
 	readonly nextStep: string | null
 	readonly failureKey: string | null
 	readonly failureAttempts: string | null
@@ -99,6 +110,7 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
 	return {
 		status: readField(lines, "Status"),
 		currentTask: readField(lines, "Current Task"),
+		owner: readField(lines, "Owner"),
 		nextStep: readField(lines, "Next Step"),
 		failureKey: readField(lines, "Failure Key"),
 		failureAttempts: readField(lines, "Failure Attempts"),

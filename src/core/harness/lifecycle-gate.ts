@@ -43,7 +43,33 @@ export function isStageMode(mode: string): mode is StageMode {
 	return STAGE_MODES.some((stage) => stage === mode)
 }
 
-export type StageLaunchGateDecision = { readonly allowed: true } | { readonly allowed: false; readonly reason: string }
+/**
+ * Stable names for the harness gates. A rejection carries the name of the gate
+ * that produced it, so the enforcement point can attribute the
+ * `harness.gate.rejected` record to exactly one gate.
+ */
+export const HARNESS_GATE_NAMES = ["stage-launch", "artifact-mutation", "stage-mode-switch", "unit-mutation"] as const
+
+export type HarnessGateName = (typeof HARNESS_GATE_NAMES)[number]
+
+/**
+ * Event name for a gate rejection. The decision functions stay pure; the
+ * enforcement points emit this record (see `gate-telemetry.ts`).
+ */
+export const HARNESS_GATE_REJECTED_EVENT = "harness.gate.rejected"
+
+export type GateRejection = {
+	readonly allowed: false
+	readonly reason: string
+	/** Which gate rejected, so the enforcement point can attribute the warn record. */
+	readonly gate: HarnessGateName
+}
+
+export type GateDecision = { readonly allowed: true } | GateRejection
+
+export type StageLaunchGateDecision = GateDecision
+
+export type StageModeSwitchGateDecision = GateDecision
 
 /**
  * Whether a stage mode may be launched while the task is in `status`.
@@ -57,7 +83,11 @@ export function evaluateStageLaunchGate(status: TaskStatus, mode: string): Stage
 		return { allowed: true }
 	}
 
-	return { allowed: false, reason: gateRejectionReason(status, "no stage mode may be launched") }
+	return {
+		allowed: false,
+		gate: "stage-launch",
+		reason: gateRejectionReason(status, "no stage mode may be launched"),
+	}
 }
 
 /**
@@ -74,9 +104,7 @@ export function isPathInsideDirectory(targetPath: string, directory: string): bo
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
 }
 
-export type ArtifactMutationGateDecision =
-	| { readonly allowed: true }
-	| { readonly allowed: false; readonly reason: string }
+export type ArtifactMutationGateDecision = GateDecision
 
 /**
  * Whether a model file-mutation tool may write to `targetPath` while the task
@@ -98,7 +126,97 @@ export function evaluateArtifactMutationGate(
 		return { allowed: true }
 	}
 
-	return { allowed: false, reason: gateRejectionReason(status, "task artifacts are read-only for model tools") }
+	return {
+		allowed: false,
+		gate: "artifact-mutation",
+		reason: gateRejectionReason(status, "task artifacts are read-only for model tools"),
+	}
+}
+
+export type StageModeSwitchGateInput = {
+	/**
+	 * Canonical lifecycle status. Part of the gate input for symmetry with the
+	 * other gates; the current rule does not depend on it.
+	 */
+	readonly status: TaskStatus
+	readonly currentMode: string
+	readonly targetMode: string
+	readonly hasParentTask: boolean
+}
+
+/**
+ * Whether a delegated stage child may switch its own mode to `targetMode`.
+ *
+ * A stage child is an executor of one stage: the harness owns stage
+ * transitions, so a child must not move itself into another stage mode (the
+ * incident: a code child switching to `orchestrator`). A root task may switch
+ * freely, a child may leave the stage modes (ordinary delegation), and a no-op
+ * switch to the current mode is allowed as today.
+ */
+export function evaluateStageModeSwitchGate(input: StageModeSwitchGateInput): GateDecision {
+	const { currentMode, targetMode, hasParentTask } = input
+
+	if (hasParentTask && isStageMode(currentMode) && isStageMode(targetMode) && targetMode !== currentMode) {
+		return {
+			allowed: false,
+			gate: "stage-mode-switch",
+			reason:
+				`A delegated stage child cannot switch from ${currentMode} to ${targetMode}: stage ` +
+				"transitions are owned by the harness. Complete the current stage with attempt_completion " +
+				"instead of switching modes.",
+		}
+	}
+
+	return { allowed: true }
+}
+
+export type UnitMutationGateInput = {
+	readonly targetPath: string
+	readonly artifactsRoot: string
+	readonly status: TaskStatus
+	/** Absolute path of the unit assigned to the executing child, or `null`. */
+	readonly assignedArtifact: string | null
+	readonly hasParentTask: boolean
+	readonly currentMode: string
+}
+
+/**
+ * Whether a delegated stage child may mutate `targetPath` while the task is in
+ * `status`.
+ *
+ * During `IMPLEMENTATION` a delegated stage child owns exactly one unit: it may
+ * write its assigned artifact but not another unit's file in `implementation/`
+ * (the incident: a child rewrote the next unit's artifact before that unit
+ * started). The restriction applies only to delegated stage children — the
+ * chain owner (root code task) keeps today's freedom to propagate contract
+ * changes into dependent units, and every path outside `implementation/` is
+ * untouched.
+ */
+export function evaluateUnitMutationGate(input: UnitMutationGateInput): GateDecision {
+	const { targetPath, artifactsRoot, status, assignedArtifact, hasParentTask, currentMode } = input
+
+	if (status !== "IMPLEMENTATION" || !hasParentTask || !isStageMode(currentMode)) {
+		return { allowed: true }
+	}
+
+	const implementationRoot = path.join(artifactsRoot, "implementation")
+
+	if (!isPathInsideDirectory(targetPath, implementationRoot)) {
+		return { allowed: true }
+	}
+
+	if (assignedArtifact && path.resolve(targetPath) === path.resolve(assignedArtifact)) {
+		return { allowed: true }
+	}
+
+	return {
+		allowed: false,
+		gate: "unit-mutation",
+		reason:
+			"A delegated stage child may only mutate its assigned implementation unit" +
+			`${assignedArtifact ? ` (${assignedArtifact})` : ""}; ${targetPath} belongs to another unit. ` +
+			"Contract propagation stays with the chain owner (see handoff.md).",
+	}
 }
 
 /**
@@ -113,8 +231,8 @@ function gateRejectionReason(status: HarnessGateStatus, subject: string): string
 	if (status === "PLAN_READY") {
 		return (
 			`The task is on the harness-owned PLAN_READY gate: ${subject} until the plan is ` +
-			'approved. Ask the user to run "Approve Plan" (zoo-code.approvePlan); the harness ' +
-			"will then start the next stage."
+			"approved. The orchestrator approves it with the `approve_plan` tool; a user does the " +
+			'same with "Approve Plan" (zoo-code.approvePlan). The harness then starts the next stage.'
 		)
 	}
 

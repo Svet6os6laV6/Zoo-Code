@@ -20,7 +20,7 @@
 import { promises as fs } from "fs"
 
 import type { TaskContext } from "../worktree/task-resolver.js"
-import { TaskStateResolver, type TaskState } from "../worktree/task-state.js"
+import { TaskStateResolver, isActiveAssignment, type TaskState } from "../worktree/task-state.js"
 import { TxxParser, type ImplementationArtifacts, type ImplementationFileSystem } from "../worktree/txx-parser.js"
 
 import { getRootHarnessLogger } from "./harness-logger.js"
@@ -45,11 +45,31 @@ export type StateReconciliation = {
 	readonly canonical: TaskState | null
 }
 
+/**
+ * Executor lease observed by the caller.
+ *
+ * The reconciler never reads the task history, so the caller supplies both the
+ * canonical `Owner` value (as `mode`/`agentTaskId`) and whether that task is
+ * currently active. `mode`/`agentTaskId` are `null` when the canonical README has
+ * no `Owner` field.
+ */
+export type AssignmentOwnerContext = {
+	readonly mode: string | null
+	readonly agentTaskId: string | null
+	readonly active: boolean
+}
+
 export type StateReconcileOptions = {
 	readonly phase?: string
 	/** Overrides the constructor logger for this call. */
 	readonly logger?: HarnessLoggerPort
 	readonly context?: HarnessLogContextInput
+	/**
+	 * Executor lease to check against the runtime assignment. When omitted the
+	 * owner check is skipped, so callers that do not track the lease keep the
+	 * previous behaviour.
+	 */
+	readonly owner?: AssignmentOwnerContext
 }
 
 const DEFAULT_PHASE = "unspecified"
@@ -178,6 +198,29 @@ export class StateReconciler {
 					),
 				)
 			}
+
+			// Ownerless assignment: the runtime shows a unit being executed, but the
+			// canonical `Owner` lease is absent or its task is not active. The caller
+			// supplies the lease and the activity flag, so the check stays read-only
+			// and non-throwing. A unit that is already `DONE` is finishing, not
+			// executing, so it is not reported.
+			if (options.owner && isActiveAssignment(runtime.status, runtime.currentTask, unit?.status)) {
+				const owner = options.owner
+				const ownerPresent = owner.mode !== null && owner.agentTaskId !== null
+
+				if (!ownerPresent || !owner.active) {
+					differences.push(
+						difference(
+							"assignment-owner",
+							runtime.currentTask,
+							ownerPresent ? `${owner.mode}#${owner.agentTaskId}` : null,
+							ownerPresent
+								? `implementation unit ${runtime.currentTask} is assigned but its owner ${owner.mode}#${owner.agentTaskId} is not active`
+								: `implementation unit ${runtime.currentTask} is assigned but no executor owns it`,
+						),
+					)
+				}
+			}
 		}
 
 		const reconciliation: StateReconciliation = {
@@ -200,6 +243,7 @@ export class StateReconciler {
 				consistent: reconciliation.consistent,
 				differenceCount: differences.length,
 				differences,
+				owner: options.owner ?? null,
 				runtime: {
 					status: runtime.status,
 					currentTask: runtime.currentTask,

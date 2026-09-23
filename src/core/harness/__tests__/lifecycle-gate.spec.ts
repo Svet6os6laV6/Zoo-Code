@@ -9,6 +9,8 @@ import {
 	STAGE_MODES,
 	evaluateArtifactMutationGate,
 	evaluateStageLaunchGate,
+	evaluateStageModeSwitchGate,
+	evaluateUnitMutationGate,
 	isHarnessGateStatus,
 	isPathInsideDirectory,
 	isStageMode,
@@ -121,5 +123,99 @@ describe("artifact-mutation gate", () => {
 		expect(isPathInsideDirectory(artifactsRoot, artifactsRoot)).toBe(true)
 		expect(isPathInsideDirectory(path.join(artifactsRoot, "README.md"), artifactsRoot)).toBe(true)
 		expect(isPathInsideDirectory(path.resolve(artifactsRoot, "..", "other"), artifactsRoot)).toBe(false)
+	})
+})
+
+describe("stage-mode-switch gate", () => {
+	const base = {
+		status: "IMPLEMENTATION" as TaskStatus,
+		currentMode: "code",
+		targetMode: "reviewer",
+		hasParentTask: true,
+	}
+
+	it("rejects a delegated stage child switching to another stage mode", () => {
+		const decision = evaluateStageModeSwitchGate(base)
+
+		expect(decision.allowed).toBe(false)
+		if (!decision.allowed) {
+			expect(decision.gate).toBe("stage-mode-switch")
+			expect(decision.reason).toContain("code")
+			expect(decision.reason).toContain("reviewer")
+		}
+	})
+
+	it("allows a root task to switch between stage modes", () => {
+		expect(evaluateStageModeSwitchGate({ ...base, hasParentTask: false })).toEqual({ allowed: true })
+	})
+
+	it("allows a delegated child to switch to a non-stage mode", () => {
+		expect(evaluateStageModeSwitchGate({ ...base, targetMode: "ask" })).toEqual({ allowed: true })
+	})
+
+	it("allows a delegated child whose current mode is not a stage mode", () => {
+		expect(evaluateStageModeSwitchGate({ ...base, currentMode: "orchestrator" })).toEqual({ allowed: true })
+	})
+
+	it("allows a no-op switch to the same stage mode", () => {
+		expect(evaluateStageModeSwitchGate({ ...base, targetMode: "code" })).toEqual({ allowed: true })
+	})
+})
+
+describe("unit-mutation gate", () => {
+	const artifactsRoot = path.resolve("/workspace", ".roo", "tasks", "fix-2")
+	const assigned = path.join(artifactsRoot, "implementation", "T05-stage-gates-extension.md")
+	const other = path.join(artifactsRoot, "implementation", "T07-orchestrator-plan-approval.md")
+	const base = {
+		artifactsRoot,
+		status: "IMPLEMENTATION" as TaskStatus,
+		assignedArtifact: assigned,
+		hasParentTask: true,
+		currentMode: "code",
+	}
+
+	it("rejects a delegated stage child mutating another unit", () => {
+		const decision = evaluateUnitMutationGate({ ...base, targetPath: other })
+
+		expect(decision.allowed).toBe(false)
+		if (!decision.allowed) {
+			expect(decision.gate).toBe("unit-mutation")
+			expect(decision.reason).toContain(other)
+		}
+	})
+
+	it("allows a delegated stage child mutating its assigned unit", () => {
+		expect(evaluateUnitMutationGate({ ...base, targetPath: assigned })).toEqual({ allowed: true })
+	})
+
+	it("allows a root task mutating any unit", () => {
+		expect(evaluateUnitMutationGate({ ...base, targetPath: other, hasParentTask: false })).toEqual({
+			allowed: true,
+		})
+	})
+
+	it("allows a delegated child in a non-stage mode", () => {
+		expect(evaluateUnitMutationGate({ ...base, targetPath: other, currentMode: "orchestrator" })).toEqual({
+			allowed: true,
+		})
+	})
+
+	it("allows mutations outside implementation/", () => {
+		expect(evaluateUnitMutationGate({ ...base, targetPath: path.join(artifactsRoot, "README.md") })).toEqual({
+			allowed: true,
+		})
+		expect(
+			evaluateUnitMutationGate({ ...base, targetPath: path.resolve("/workspace", "src", "core", "index.ts") }),
+		).toEqual({ allowed: true })
+	})
+
+	it("allows mutations in statuses other than IMPLEMENTATION", () => {
+		expect(evaluateUnitMutationGate({ ...base, targetPath: other, status: "REVIEW" })).toEqual({ allowed: true })
+	})
+
+	it("rejects when no unit is assigned", () => {
+		const decision = evaluateUnitMutationGate({ ...base, targetPath: other, assignedArtifact: null })
+
+		expect(decision.allowed).toBe(false)
 	})
 })
