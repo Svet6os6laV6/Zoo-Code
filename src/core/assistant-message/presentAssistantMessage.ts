@@ -1,10 +1,12 @@
+import * as path from "path"
+
 import { serializeError } from "serialize-error"
 import { Anthropic } from "@anthropic-ai/sdk"
 
 import type { ToolName, ClineAsk, ToolProgressStatus } from "@roo-code/types"
 import { ConsecutiveMistakeError, TelemetryEventName } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
-import { customToolRegistry, harnessLogger } from "@roo-code/core"
+import { customToolRegistry, harnessLogger, TaskStateResolver, type TaskStatus } from "@roo-code/core"
 
 import { t } from "../../i18n"
 
@@ -37,6 +39,9 @@ import { generateImageTool } from "../tools/GenerateImageTool"
 import { applyDiffTool as applyDiffToolClass } from "../tools/ApplyDiffTool"
 import { isValidToolName, validateToolUse } from "../tools/validateToolUse"
 import { codebaseSearchTool } from "../tools/CodebaseSearchTool"
+import { parsePatch } from "../tools/apply-patch"
+
+import { evaluateArtifactMutationGate, type ArtifactMutationGateDecision } from "../harness/lifecycle-gate"
 
 import { formatResponse } from "../prompts/responses"
 import { sanitizeToolUseId } from "../../utils/tool-id"
@@ -64,6 +69,117 @@ export function toTelemetryToolName(
 	}
 
 	return "invalid_tool_call"
+}
+
+/**
+ * Tool names that write to the workspace. The artifact-mutation gate only
+ * applies to these; read-only tools are never affected.
+ */
+const MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"write_to_file",
+	"apply_diff",
+	"edit",
+	"search_and_replace",
+	"search_replace",
+	"edit_file",
+	"apply_patch",
+])
+
+/**
+ * Workspace-relative target paths a mutation tool would write to.
+ *
+ * Every mutation tool except `apply_patch` carries a single `path` param.
+ * `apply_patch` has no `path`: its targets live in the patch file headers, so
+ * the patch is parsed here. A malformed patch yields no paths — the tool itself
+ * reports the parse error, and the gate must not turn it into a gate error.
+ */
+function mutationTargetPaths(block: ToolUse): string[] {
+	if (block.name === "apply_patch") {
+		const patch = block.params.patch
+		if (!patch) {
+			return []
+		}
+
+		try {
+			return parsePatch(patch).hunks.flatMap((hunk) =>
+				hunk.type === "UpdateFile" && hunk.movePath ? [hunk.path, hunk.movePath] : [hunk.path],
+			)
+		} catch {
+			return []
+		}
+	}
+
+	const relPath = block.params.path
+	return relPath ? [relPath] : []
+}
+
+/**
+ * Decide whether the model may mutate the target of `block` right now.
+ *
+ * The canonical status is resolved fresh from the task README at the moment of
+ * the mutation (mutations are rare relative to read-only tools, so the extra
+ * read is cheap and never stale). A task without a harness context — ordinary
+ * work outside harness tasks — has no artifacts root to protect, so a failed
+ * context or state resolution allows the mutation rather than blocking it.
+ */
+async function evaluateArtifactMutationGateForTask(cline: Task, block: ToolUse): Promise<ArtifactMutationGateDecision> {
+	if (!MUTATION_TOOL_NAMES.has(block.name)) {
+		return { allowed: true }
+	}
+
+	const targetPaths = mutationTargetPaths(block)
+	if (targetPaths.length === 0) {
+		return { allowed: true }
+	}
+
+	let artifactsRoot: string
+	let status: TaskStatus
+	try {
+		const context = await cline.getTaskContext()
+		artifactsRoot = context.taskRoot
+		status = (await new TaskStateResolver().resolve(context)).status
+	} catch {
+		return { allowed: true }
+	}
+
+	for (const relPath of targetPaths) {
+		const decision = evaluateArtifactMutationGate(path.resolve(cline.cwd, relPath), artifactsRoot, status)
+
+		if (!decision.allowed) {
+			return decision
+		}
+	}
+
+	return { allowed: true }
+}
+
+/**
+ * Metadata-only record of a completed tool call, so the log reads
+ * `tool.call -> artifact.changed -> taskUnit.statusChanged` in order.
+ *
+ * Never the tool payload: params and results stay out of the harness log.
+ * Partial streaming chunks are skipped — they would otherwise produce one
+ * event per chunk with a near-zero duration.
+ */
+async function emitToolCallRecord(cline: Task, block: ToolUse, startedAt: number): Promise<void> {
+	if (block.partial) {
+		return
+	}
+
+	try {
+		const harnessContext = await cline.getHarnessLogContext()
+
+		harnessLogger().event("harness.tool.call", {
+			context: { ...harnessContext, txxId: null },
+			attributes: {
+				tool: block.name,
+				durationMs: Date.now() - startedAt,
+				partial: false,
+			},
+		})
+	} catch {
+		// Observability must never break tool execution.
+	}
 }
 
 /**
@@ -728,6 +844,20 @@ export async function presentAssistantMessage(cline: Task) {
 			// model-issued tool invocation regardless of which handler ran.
 			const toolCallStartedAt = Date.now()
 
+			// Harness-owned gates: while the task sits on PLAN_READY or BLOCKED the
+			// canonical artifacts are read-only for model tools. The gate is a guard,
+			// not a model error, so it does not touch consecutiveMistakeCount or
+			// recordToolError (mirrors the new_task launch gate).
+			// NOTE: `execute_command` can still mutate artifacts through a shell; that
+			// path is deliberately out of scope for this gate.
+			const mutationGate = await evaluateArtifactMutationGateForTask(cline, block)
+
+			if (!mutationGate.allowed) {
+				pushToolResult(formatResponse.toolError(mutationGate.reason))
+				await emitToolCallRecord(cline, block, toolCallStartedAt)
+				break
+			}
+
 			switch (block.name) {
 				case "write_to_file":
 					await checkpointSaveAndMark(cline)
@@ -971,23 +1101,7 @@ export async function presentAssistantMessage(cline: Task) {
 				}
 			}
 
-			// Metadata-only record of the tool call itself, so the log reads
-			// `tool.call -> artifact.changed -> taskUnit.statusChanged` in order.
-			// Never the tool payload: params and results stay out of the harness log.
-			try {
-				const harnessContext = await cline.getHarnessLogContext()
-
-				harnessLogger().event("harness.tool.call", {
-					context: { ...harnessContext, txxId: null },
-					attributes: {
-						tool: block.name,
-						durationMs: Date.now() - toolCallStartedAt,
-						partial: Boolean(block.partial),
-					},
-				})
-			} catch {
-				// Observability must never break tool execution.
-			}
+			await emitToolCallRecord(cline, block, toolCallStartedAt)
 
 			break
 		}
