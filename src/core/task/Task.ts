@@ -1,4 +1,5 @@
 import * as path from "path"
+import { promises as fs } from "fs"
 import * as vscode from "vscode"
 import os from "os"
 import crypto from "crypto"
@@ -156,6 +157,7 @@ import { mergeConsecutiveApiMessages } from "./mergeConsecutiveApiMessages"
 import { prepareApiConversationMessage } from "./apiConversationHistory"
 import { shouldAddUserMessageToHistory } from "./messageCounting"
 import { type TaskExecutionContext } from "./providerHandoff"
+import { computeArtifactFingerprint } from "../harness/artifact-fingerprint"
 
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
@@ -573,6 +575,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private lastArtifactSnapshot?: ImplementationArtifacts
 	/** Canonical README fields at the previous resolve, for README change detection. */
 	private lastResolvedTaskState?: Pick<TaskState, "status" | "currentTask">
+	/**
+	 * Fingerprint of the README plus the implementation snapshot at the last full
+	 * resolve. When the next resolve observes the same fingerprint, the outcome is
+	 * deterministic and the cached result is returned instead of re-running the
+	 * validator, the scheduler, and the reconciler.
+	 */
+	private lastResolveFingerprint?: string
+	/** Result of the last full resolve, returned verbatim on a fingerprint hit. */
+	private lastResolvedResult?: { taskState: TaskState; artifactIssues: ArtifactValidationIssue[] }
 	/**
 	 * Lifecycle trace id for harness records: minted once, on the first harness
 	 * identity resolution, and reused for every turn, mode, and implementation
@@ -4546,18 +4557,29 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	): Promise<{ taskState: TaskState; artifactIssues: ArtifactValidationIssue[] }> {
 		const logger = harnessLogger(this.harnessLogger)
 
+		// `implementation/` is read exactly once per resolve. The validator and
+		// the scheduler both consume this snapshot, so a concurrent write cannot
+		// make the validation decision and the assignment decision describe two
+		// different DAGs.
+		const snapshot = await this.txxParser.read(taskContext)
+		const readme = await this.readCanonicalReadme(taskContext)
+		const fingerprint = computeArtifactFingerprint({ readme, snapshot })
+
+		// Short-circuit: when neither the canonical README nor the implementation
+		// artifacts changed since the last full resolve, the outcome is
+		// deterministic. Re-running the validator, the scheduler, and the
+		// reconciler would only re-emit the same decision records, so the cached
+		// result is returned as-is.
+		if (this.lastResolveFingerprint === fingerprint && this.lastResolvedResult) {
+			return this.lastResolvedResult
+		}
+
 		return logger.span(
 			"harness.resolveTaskState",
 			async (span) => {
 				const artifactIssues: ArtifactValidationIssue[] = []
 				let taskState: TaskState
 				let readmeRejected = false
-
-				// `implementation/` is read exactly once per resolve. The validator and
-				// the scheduler both consume this snapshot, so a concurrent write cannot
-				// make the validation decision and the assignment decision describe two
-				// different DAGs.
-				const snapshot = await this.txxParser.read(taskContext)
 
 				try {
 					taskState = await this.taskStateResolver.resolve(taskContext)
@@ -4632,6 +4654,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// point.
 				this.lastArtifactSnapshot = snapshot
 				this.lastResolvedTaskState = { status: taskState.status, currentTask: taskState.currentTask }
+				// Cache the outcome against the fingerprint of the inputs it was
+				// derived from, so an unchanged next resolve can skip the work.
+				this.lastResolveFingerprint = fingerprint
+				this.lastResolvedResult = { taskState, artifactIssues }
 
 				// Diagnostic only: compare the runtime view with the canonical artifacts
 				// after a transition. The reconciler never mutates and never throws.
@@ -4665,6 +4691,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			},
 			{ context: { taskId: taskContext.taskId } },
 		)
+	}
+
+	/**
+	 * Read the raw canonical README for change detection.
+	 *
+	 * A missing or unreadable README is reported as `null` so the fingerprint
+	 * stays stable across resolves instead of forcing a full re-resolution on
+	 * every read error. The state resolver reports the malformed-README problem
+	 * itself.
+	 */
+	private async readCanonicalReadme(taskContext: TaskContext): Promise<string | null> {
+		try {
+			return await fs.readFile(path.join(taskContext.taskRoot, "README.md"), "utf8")
+		} catch {
+			return null
+		}
 	}
 
 	private getCurrentProfileId(state: any): string {

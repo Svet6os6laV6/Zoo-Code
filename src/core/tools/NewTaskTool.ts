@@ -1,5 +1,6 @@
 import * as vscode from "vscode"
 
+import { TaskStateResolver, type TaskStatus } from "@roo-code/core"
 import type { PendingTaskAction, TodoItem } from "@roo-code/types"
 
 import { Task } from "../task/Task"
@@ -11,11 +12,32 @@ import { Package } from "../../shared/package"
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 import type { ToolUse } from "../../shared/tools"
 import { sanitizeToolUseId } from "../../utils/tool-id"
+import { evaluateStageLaunchGate, isStageMode, type StageLaunchGateDecision } from "../harness/lifecycle-gate"
 
 interface NewTaskParams {
 	mode: string
 	message: string
 	todos?: string
+}
+
+/**
+ * Resolve the canonical lifecycle status of the executing task and decide
+ * whether `mode` may be launched through `new_task`.
+ *
+ * A task without a harness context (ordinary delegation outside harness tasks)
+ * has no canonical status to enforce, so the gate is a no-op: a failed context
+ * or state resolution allows the launch rather than blocking ordinary work.
+ */
+async function evaluateStageLaunchGateForTask(task: Task, mode: string): Promise<StageLaunchGateDecision> {
+	let status: TaskStatus
+	try {
+		const context = await task.getTaskContext()
+		status = (await new TaskStateResolver().resolve(context)).status
+	} catch {
+		return { allowed: true }
+	}
+
+	return evaluateStageLaunchGate(status, mode)
 }
 
 export class NewTaskTool extends BaseTool<"new_task"> {
@@ -94,6 +116,19 @@ export class NewTaskTool extends BaseTool<"new_task"> {
 			if (!targetMode) {
 				pushToolResult(formatResponse.toolError(`Invalid mode: ${mode}`))
 				return
+			}
+
+			// Harness-owned gates: a stage mode must not be launched through
+			// `new_task` while the task sits on PLAN_READY or BLOCKED. The gate is a
+			// guard, not a model error, so it does not touch consecutiveMistakeCount
+			// or recordToolError (mirrors the "Invalid mode" path above).
+			if (isStageMode(mode)) {
+				const gate = await evaluateStageLaunchGateForTask(task, mode)
+
+				if (!gate.allowed) {
+					pushToolResult(formatResponse.toolError(gate.reason))
+					return
+				}
 			}
 
 			const toolMessage = JSON.stringify({

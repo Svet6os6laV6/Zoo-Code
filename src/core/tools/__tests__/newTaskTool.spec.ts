@@ -1,5 +1,6 @@
 // npx vitest core/tools/__tests__/newTaskTool.spec.ts
 
+import type { TaskStatus } from "@roo-code/core"
 import type { AskApproval, HandleError, NativeToolArgs, ToolUse } from "../../../shared/tools"
 
 // Mock vscode module
@@ -10,6 +11,20 @@ vi.mock("vscode", () => ({
 		})),
 	},
 }))
+
+// The lifecycle gate resolves the canonical task state through `TaskStateResolver`;
+// the resolver is replaced so the spec controls the status the gate observes.
+const resolveState = vi.hoisted(() => vi.fn())
+
+vi.mock("@roo-code/core", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@roo-code/core")>()
+	return {
+		...actual,
+		TaskStateResolver: class {
+			resolve = resolveState
+		},
+	}
+})
 
 // Mock Package module
 vi.mock("../../../shared/package", () => ({
@@ -84,6 +99,23 @@ const mockDelegateParentAndOpenChild = vi.fn(
 )
 const mockCheckpointSave = vi.fn()
 
+// Canonical task context the lifecycle gate resolves through `getTaskContext`.
+const mockTaskContext = {
+	taskId: "mock-parent-task-id",
+	branch: "feature/mock-parent-task-id",
+	taskRoot: "/workspace/.roo/tasks/mock-parent-task-id",
+}
+
+// Canonical task state the lifecycle gate resolves; only `status` varies per test.
+const taskStateWith = (status: TaskStatus) => ({
+	taskId: mockTaskContext.taskId,
+	status,
+	currentTask: null,
+	currentTaskArtifact: null,
+	failureKey: null,
+	failureAttempts: 0,
+})
+
 // Mock the Cline instance and its methods/properties
 const mockCline = {
 	ask: vi.fn(),
@@ -94,6 +126,7 @@ const mockCline = {
 	isPaused: false,
 	pausedModeSlug: "ask",
 	taskId: "mock-parent-task-id",
+	getTaskContext: vi.fn().mockResolvedValue(mockTaskContext),
 	enableCheckpoints: false,
 	checkpointSave: mockCheckpointSave,
 	startSubtask: mockStartSubtask,
@@ -110,6 +143,7 @@ const mockCline = {
 import { newTaskTool } from "../NewTaskTool"
 import { getModeBySlug } from "../../../shared/modes"
 import * as vscode from "vscode"
+import type { Task } from "../../task/Task"
 
 const withNativeArgs = (block: ToolUse<"new_task">): ToolUse<"new_task"> => ({
 	...block,
@@ -136,6 +170,8 @@ describe("newTaskTool", () => {
 		}) // Default valid mode
 		mockCline.consecutiveMistakeCount = 0
 		mockCline.isPaused = false
+		// Default: the task is in a status where every stage mode is legitimate.
+		resolveState.mockResolvedValue(taskStateWith("IMPLEMENTATION"))
 		// Default: VSCode setting is disabled
 		const mockGet = vi.fn().mockReturnValue(false)
 		vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({
@@ -596,6 +632,7 @@ describe("newTaskTool delegation flow", () => {
 			isPaused: false,
 			pausedModeSlug: "ask",
 			taskId: "mock-parent-task-id",
+			getTaskContext: vi.fn().mockResolvedValue(mockTaskContext),
 			setPendingTaskAction: vi.fn(),
 			enableCheckpoints: false,
 			checkpointSave: mockCheckpointSave,
@@ -652,5 +689,96 @@ describe("newTaskTool delegation flow", () => {
 
 		// Assert: tool result reflects delegation
 		expect(mockPushToolResult).toHaveBeenCalledWith(expect.stringContaining("Delegated to child task child-1"))
+	})
+})
+
+describe("newTaskTool harness lifecycle gate", () => {
+	const makeBlock = (mode: string): ToolUse<"new_task"> => ({
+		type: "tool_use",
+		name: "new_task",
+		params: { mode, message: "Do something" },
+		partial: false,
+	})
+
+	// The tool only reads `getTaskContext`/`consecutiveMistakeCount`/`recordToolError`
+	// from the task, so the structural stub is asserted to `Task` for the call.
+	const cline = mockCline as unknown as Task
+
+	const run = (mode: string) =>
+		newTaskTool.handle(cline, withNativeArgs(makeBlock(mode)), {
+			askApproval: mockAskApproval,
+			handleError: mockHandleError,
+			pushToolResult: mockPushToolResult,
+		})
+
+	beforeEach(() => {
+		vi.clearAllMocks()
+		mockAskApproval.mockResolvedValue(true)
+		vi.mocked(getModeBySlug).mockReturnValue({
+			slug: "code",
+			name: "Code Mode",
+			roleDefinition: "Test role definition",
+			groups: ["command", "read", "edit"],
+		})
+		mockCline.consecutiveMistakeCount = 0
+		mockCline.getTaskContext.mockResolvedValue(mockTaskContext)
+		resolveState.mockResolvedValue(taskStateWith("IMPLEMENTATION"))
+		vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({
+			get: vi.fn().mockReturnValue(false),
+		} as unknown as vscode.WorkspaceConfiguration)
+	})
+
+	it("rejects a stage mode while the task is PLAN_READY", async () => {
+		resolveState.mockResolvedValue(taskStateWith("PLAN_READY"))
+
+		await run("code")
+
+		expect(mockPushToolResult).toHaveBeenCalledWith(expect.stringContaining("PLAN_READY"))
+		expect(mockAskApproval).not.toHaveBeenCalled()
+		expect(mockStartSubtask).not.toHaveBeenCalled()
+		// The gate is a guard, not a model error.
+		expect(mockCline.consecutiveMistakeCount).toBe(0)
+		expect(mockRecordToolError).not.toHaveBeenCalled()
+	})
+
+	it("allows a non-stage mode while the task is PLAN_READY", async () => {
+		resolveState.mockResolvedValue(taskStateWith("PLAN_READY"))
+		vi.mocked(getModeBySlug).mockReturnValue({
+			slug: "orchestrator",
+			name: "Orchestrator",
+			roleDefinition: "Test role definition",
+			groups: ["command", "read", "edit"],
+		})
+
+		await run("orchestrator")
+
+		expect(mockAskApproval).toHaveBeenCalled()
+		expect(mockStartSubtask).toHaveBeenCalled()
+	})
+
+	it("rejects a stage mode while the task is BLOCKED", async () => {
+		resolveState.mockResolvedValue(taskStateWith("BLOCKED"))
+
+		await run("code")
+
+		expect(mockPushToolResult).toHaveBeenCalledWith(expect.stringContaining("BLOCKED"))
+		expect(mockAskApproval).not.toHaveBeenCalled()
+		expect(mockStartSubtask).not.toHaveBeenCalled()
+	})
+
+	it("allows a stage mode while the task is IMPLEMENTATION", async () => {
+		await run("code")
+
+		expect(mockAskApproval).toHaveBeenCalled()
+		expect(mockStartSubtask).toHaveBeenCalled()
+	})
+
+	it("allows a stage mode when there is no harness task context", async () => {
+		mockCline.getTaskContext.mockRejectedValueOnce(new Error("Unable to resolve task ID"))
+
+		await run("code")
+
+		expect(mockAskApproval).toHaveBeenCalled()
+		expect(mockStartSubtask).toHaveBeenCalled()
 	})
 })

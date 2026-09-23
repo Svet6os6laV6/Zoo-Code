@@ -44,6 +44,7 @@ type TaskTestAccess = {
 	safeEnsureModelFetched: () => Promise<void>
 	addToApiConversationHistory: (message: unknown, reasoning?: string) => Promise<void>
 	resetAssistantMessagePersistence: () => void
+	readCanonicalReadme: (taskContext: { taskRoot: string }) => Promise<string | null>
 }
 
 type TaskAskResult = Awaited<ReturnType<Task["ask"]>>
@@ -1089,6 +1090,120 @@ describe("Cline", () => {
 			expect(artifactChange).toBeDefined()
 			expect(artifactChange?.stateBefore).toMatchObject({ status: "IN_PROGRESS" })
 			expect(artifactChange?.stateAfter).toMatchObject({ status: "DONE" })
+		})
+
+		it("short-circuits the resolve when the artifacts are unchanged between prompt assemblies", async () => {
+			const taskContext = {
+				taskId: "SITESUP-1116",
+				branch: "feature/SITESUP-1116-heartbeat",
+				taskRoot: "/mock/workspace/path/.roo/tasks/SITESUP-1116",
+			}
+			const taskState = {
+				taskId: "SITESUP-1116",
+				status: "IMPLEMENTATION" as const,
+				currentTask: "T01",
+				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
+				failureKey: null,
+				failureAttempts: 0,
+			}
+			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
+			const snapshotWith = (contentHash: string): ImplementationArtifacts => ({
+				directory,
+				missingDirectory: false,
+				tasks: [
+					{
+						id: "T01",
+						fileName: "T01-worker.md",
+						artifact: `${directory}/T01-worker.md`,
+						status: "IN_PROGRESS",
+						statusProblem: null,
+						dependsOn: [],
+						parallelWith: [],
+						produces: null,
+						consumes: null,
+						unclosedCodeFence: false,
+						contentHash,
+					},
+				],
+				duplicateIds: [],
+				unexpectedFiles: [],
+			})
+			const records: HarnessLogRecord[] = []
+			let currentSnapshot = snapshotWith("T01:IN_PROGRESS")
+			let currentReadme = "Status: IMPLEMENTATION\n"
+			const read = vi.fn().mockImplementation(async () => currentSnapshot)
+			const resolveState = vi.fn().mockResolvedValue(taskState)
+			const validate = vi.fn().mockImplementation(async () => ({
+				issues: [],
+				errors: [],
+				warnings: [],
+				valid: true,
+				artifacts: currentSnapshot,
+			}))
+			const assignNext = vi.fn().mockResolvedValue(null)
+
+			vi.spyOn(mockProvider, "getState").mockResolvedValue({
+				mode: "code",
+				mcpEnabled: false,
+			} as unknown as ProviderState)
+
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+				taskResolver: { resolve: vi.fn().mockResolvedValue(taskContext) },
+				taskStateResolver: { resolve: resolveState },
+				artifactValidator: { validate },
+				taskScheduler: { assignNext },
+				txxParser: { read },
+				harnessLogger: new HarnessLogger({
+					sinks: [
+						{
+							name: "recording",
+							write: (record) => {
+								records.push(record)
+							},
+						},
+					],
+				}),
+			})
+			await task.getTaskMode()
+			vi.mocked(SYSTEM_PROMPT).mockResolvedValue("mock system prompt")
+			vi.spyOn(getTaskTestAccess(task), "readCanonicalReadme").mockImplementation(async () => currentReadme)
+
+			// First assembly: no baseline, so the resolve is full.
+			await getTaskTestAccess(task).getSystemPrompt()
+			expect(resolveState).toHaveBeenCalledTimes(1)
+			expect(validate).toHaveBeenCalledTimes(1)
+			expect(assignNext).toHaveBeenCalledTimes(1)
+			const recordsAfterFirst = records.length
+
+			// Second assembly with identical artifacts: the fingerprint matches, so
+			// the resolve is skipped and no new record is emitted.
+			await getTaskTestAccess(task).getSystemPrompt()
+			expect(resolveState).toHaveBeenCalledTimes(1)
+			expect(validate).toHaveBeenCalledTimes(1)
+			expect(assignNext).toHaveBeenCalledTimes(1)
+			expect(records.length).toBe(recordsAfterFirst)
+
+			// The cached state still reaches the prompt unchanged.
+			const cachedCall = requireDefined(vi.mocked(SYSTEM_PROMPT).mock.calls.at(-1))
+			expect(cachedCall[12]).toMatchObject({ taskState, artifactValidationIssues: [] })
+
+			// A rewritten implementation unit invalidates the cache.
+			currentSnapshot = snapshotWith("T01:DONE")
+			await getTaskTestAccess(task).getSystemPrompt()
+			expect(resolveState).toHaveBeenCalledTimes(2)
+			expect(validate).toHaveBeenCalledTimes(2)
+			expect(assignNext).toHaveBeenCalledTimes(2)
+
+			// A rewritten canonical README invalidates the cache as well.
+			currentReadme = "Status: READY_FOR_REVIEW\n"
+			await getTaskTestAccess(task).getSystemPrompt()
+			expect(resolveState).toHaveBeenCalledTimes(3)
+			expect(validate).toHaveBeenCalledTimes(3)
+			expect(assignNext).toHaveBeenCalledTimes(3)
 		})
 
 		it("records one metadata-only llm.request pair per provider request", async () => {
