@@ -163,8 +163,26 @@ describe("ClineProvider.continueTaskLifecycle", () => {
 		const { provider, task } = makeProvider({ mode: "architect" })
 		runHarness.mockResolvedValue({ type: "stopped", status: "PLAN_READY", reason: "plan-approval" })
 
-		expect(await provider.continueTaskLifecycle(task as unknown as Task, "Stage Result: COMPLETED")).toBe(true)
+		// A `stopped` result is not an advance: the caller keeps its ordinary path.
+		expect(await provider.continueTaskLifecycle(task as unknown as Task, "Stage Result: COMPLETED")).toBe(false)
 		expect(showInformationMessage).toHaveBeenCalledWith(expect.stringContaining("waiting for plan approval"))
+	})
+
+	it("keeps the completion path when the lifecycle reaches its terminal DONE", async () => {
+		const { provider, task } = makeProvider({ mode: "qa" })
+		runHarness.mockResolvedValue({ type: "stopped", status: "DONE", reason: "done" })
+
+		// `DONE` must not look like a started stage, otherwise the top-level task
+		// would stay active instead of finishing through the completion ask.
+		expect(await provider.continueTaskLifecycle(task as unknown as Task, "Stage Result: PASSED")).toBe(false)
+		expect(showInformationMessage).not.toHaveBeenCalled()
+	})
+
+	it("keeps the existing path when the lifecycle stops as BLOCKED", async () => {
+		const { provider, task } = makeProvider({ mode: "code" })
+		runHarness.mockResolvedValue({ type: "stopped", status: "BLOCKED", reason: "blocked" })
+
+		expect(await provider.continueTaskLifecycle(task as unknown as Task, "Stage Result: BLOCKED")).toBe(false)
 	})
 
 	it("declines a non-lifecycle mode without consulting the runner", async () => {
@@ -319,6 +337,18 @@ describe("ClineProvider.continueTaskLifecycleFromCommand", () => {
 
 		expect(continueHarness).toHaveBeenCalledTimes(1)
 		expect(showInformationMessage).not.toHaveBeenCalled()
+	})
+
+	it("reports completion when the lifecycle already reached DONE", async () => {
+		const { provider } = makeProvider({ mode: "code" })
+		continueHarness.mockResolvedValue({ type: "stopped", status: "DONE", reason: "done" })
+
+		await provider.continueTaskLifecycleFromCommand()
+
+		expect(showInformationMessage).toHaveBeenCalledWith(expect.stringContaining("lifecycle is complete"))
+		expect(showInformationMessage).not.toHaveBeenCalledWith(
+			expect.stringContaining("cannot be advanced programmatically"),
+		)
 	})
 })
 

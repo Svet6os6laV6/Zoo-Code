@@ -56,10 +56,24 @@ export function setPanel(
 	}
 }
 
+/**
+ * Harness log-viewer commands depend on activation-time state that lives in
+ * `extension.ts` (the harness logging handle and the extension path). They are
+ * injected as callbacks instead of duplicating that state here or keeping it in
+ * module-level variables.
+ */
+export type HarnessCommandHandlers = {
+	/** Opens the harness log viewer in the system browser. */
+	openLogViewer: () => Promise<void>
+	/** Registers the `harness-logs` MCP server and reports the outcome to the user. */
+	registerMcpServer: () => Promise<void>
+}
+
 export type RegisterCommandOptions = {
 	context: vscode.ExtensionContext
 	outputChannel: vscode.OutputChannel
 	provider: ClineProvider
+	harness: HarnessCommandHandlers
 }
 
 export const registerCommands = (options: RegisterCommandOptions) => {
@@ -89,6 +103,7 @@ const getCommandsMap = ({
 	context,
 	outputChannel,
 	provider,
+	harness,
 }: RegisterCommandOptions): Record<Exclude<CommandId, "showRipgrepDiagnostic">, CommandCallback> => ({
 	activationCompleted: () => {},
 	plusButtonClicked: async () => {
@@ -258,9 +273,14 @@ const getCommandsMap = ({
 			outputChannel.appendLine(`[approvePlan] failed: ${error}`)
 		}
 	},
+	openHarnessLogViewer: () => harness.openLogViewer(),
+	registerHarnessLogsMcp: () => harness.registerMcpServer(),
 })
 
-export const openClineInNewTab = async ({ context, outputChannel }: Omit<RegisterCommandOptions, "provider">) => {
+export const openClineInNewTab = async ({
+	context,
+	outputChannel,
+}: Pick<RegisterCommandOptions, "context" | "outputChannel">) => {
 	// (This example uses webviewProvider activation event which is necessary to
 	// deserialize cached webview, but since we use retainContextWhenHidden, we
 	// don't need to use that event).

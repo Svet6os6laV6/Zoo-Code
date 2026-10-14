@@ -1,9 +1,8 @@
 /**
  * Harness Observability
  *
- * Centralized structured logging for the programmatic harness: one logger,
- * explicit sinks, and a diagnostic reconciler between runtime and canonical
- * state. Platform-agnostic — the host injects sinks.
+ * Centralized structured logging for the programmatic harness: one logger and
+ * explicit sinks. Platform-agnostic — the host injects sinks.
  */
 
 export {
@@ -62,13 +61,3 @@ export {
 	redactValue,
 	type RedactOptions,
 } from "./redaction.js"
-
-export {
-	StateReconciler,
-	diffTaskState,
-	type AssignmentOwnerContext,
-	type StateDifference,
-	type StateReconcileOptions,
-	type StateReconciliation,
-	type StateReconcilerFileSystem,
-} from "./state-reconciler.js"

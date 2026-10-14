@@ -51,6 +51,9 @@ export const commandIds = [
 	"continueTaskLifecycle",
 	"approvePlan",
 
+	"openHarnessLogViewer",
+	"registerHarnessLogsMcp",
+
 	"showRipgrepDiagnostic",
 ] as const
 

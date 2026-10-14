@@ -11,6 +11,7 @@
  * everything else in the file is preserved byte for byte.
  */
 
+import { randomUUID } from "crypto"
 import { promises as fs } from "fs"
 import * as path from "path"
 
@@ -18,14 +19,6 @@ export const README_FILENAME = "README.md"
 
 /** Canonical value declaring that no implementation unit is assigned. */
 export const NO_CURRENT_TASK = "NONE"
-
-/**
- * Canonical value declaring that no executor currently holds the assignment
- * lease. The `Owner` field is diagnostic only: it records which task is running
- * the assigned unit so `StateReconciler` can flag an assignment with no active
- * owner. It never participates in lifecycle routing.
- */
-export const NO_OWNER = "NONE"
 
 /** Canonical value declaring that no failure is currently being remediated. */
 export const NO_FAILURE_KEY = "NONE"
@@ -41,7 +34,6 @@ export const NO_FAILURE_ATTEMPTS = "0"
 export const CANONICAL_README_FIELDS = [
 	"Status",
 	"Current Task",
-	"Owner",
 	"Next Step",
 	"Failure Key",
 	"Failure Attempts",
@@ -56,8 +48,6 @@ export type CanonicalReadmeFields = Partial<Record<CanonicalReadmeField, string>
 export type CanonicalReadmeSnapshot = {
 	readonly status: string | null
 	readonly currentTask: string | null
-	/** Executor lease (`<mode>#<agentTaskId>`), or `null` when the field is absent. */
-	readonly owner: string | null
 	readonly nextStep: string | null
 	readonly failureKey: string | null
 	readonly failureAttempts: string | null
@@ -110,7 +100,6 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
 	return {
 		status: readField(lines, "Status"),
 		currentTask: readField(lines, "Current Task"),
-		owner: readField(lines, "Owner"),
 		nextStep: readField(lines, "Next Step"),
 		failureKey: readField(lines, "Failure Key"),
 		failureAttempts: readField(lines, "Failure Attempts"),
@@ -169,6 +158,45 @@ export function writeCanonicalFields(readme: string, fields: CanonicalReadmeFiel
 }
 
 /**
+ * In-process serialization of canonical README mutations, keyed by task root.
+ *
+ * Two writers can race on the same README: the lifecycle runner and the
+ * scheduler both read-modify-write the canonical block. Without serialization
+ * they can read the same state and lose one update, and a shared temporary file
+ * name makes the second rename race the first with `ENOENT`. The lock is
+ * intentionally in-process only: the extension host is a single process per
+ * window, so a cross-process lock would add failure modes without protecting
+ * anything.
+ */
+const readmeLocks = new Map<string, Promise<unknown>>()
+
+/**
+ * Run `fn` while holding the per-`taskRoot` README lock.
+ *
+ * The queue is a promise chain: each caller waits for the previous operation to
+ * settle before it starts. A failed operation is swallowed for the queue (the
+ * next caller still runs) but still rejects the promise returned to its own
+ * caller, so an error is never hidden from the operation that caused it.
+ */
+export function withReadmeLock<T>(taskRoot: string, fn: () => Promise<T>): Promise<T> {
+	const previous = readmeLocks.get(taskRoot) ?? Promise.resolve()
+	const run = previous.then(() => fn())
+	const tail = run.then(
+		() => undefined,
+		() => undefined,
+	)
+
+	readmeLocks.set(taskRoot, tail)
+	void tail.then(() => {
+		if (readmeLocks.get(taskRoot) === tail) {
+			readmeLocks.delete(taskRoot)
+		}
+	})
+
+	return run
+}
+
+/**
  * Write through a temporary file so a concurrent reader never observes a
  * partially written README.
  */
@@ -177,7 +205,10 @@ export async function writeReadmeAtomic(
 	filePath: string,
 	content: string,
 ): Promise<void> {
-	const temporary = `${filePath}.${process.pid}.tmp`
+	// The temporary name must be unique per call: two writers in the same process
+	// would otherwise share `<path>.<pid>.tmp`, and the second rename would race
+	// the first with `ENOENT`.
+	const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`
 	await fileSystem.writeFile(temporary, content, "utf8")
 	await fileSystem.rename(temporary, filePath)
 }
@@ -191,16 +222,20 @@ export class CanonicalReadmeWriter {
 	constructor(private readonly fileSystem: ReadmeFileSystem = fs) {}
 
 	async update(taskRoot: string, fields: CanonicalReadmeFields): Promise<CanonicalReadmeUpdate> {
-		const filePath = readmePath(taskRoot)
-		const readme = await this.fileSystem.readFile(filePath, "utf8")
-		const updated = writeCanonicalFields(readme, fields)
+		// The whole read-modify-write runs inside the per-taskRoot lock, so a
+		// concurrent writer cannot read the same state and lose this update.
+		return withReadmeLock(taskRoot, async () => {
+			const filePath = readmePath(taskRoot)
+			const readme = await this.fileSystem.readFile(filePath, "utf8")
+			const updated = writeCanonicalFields(readme, fields)
 
-		if (updated === null) {
-			throw new CanonicalReadmeError(`Cannot update the canonical block without a Status field: ${filePath}`)
-		}
+			if (updated === null) {
+				throw new CanonicalReadmeError(`Cannot update the canonical block without a Status field: ${filePath}`)
+			}
 
-		await writeReadmeAtomic(this.fileSystem, filePath, updated)
+			await writeReadmeAtomic(this.fileSystem, filePath, updated)
 
-		return { filePath, before: readCanonicalFields(readme), after: readCanonicalFields(updated) }
+			return { filePath, before: readCanonicalFields(readme), after: readCanonicalFields(updated) }
+		})
 	}
 }

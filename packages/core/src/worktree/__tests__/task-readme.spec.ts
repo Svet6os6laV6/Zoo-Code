@@ -1,18 +1,21 @@
 import * as path from "path"
 
+import { TaskScheduler } from "../task-scheduler.js"
+import type { TaskContext } from "../task-resolver.js"
+import type { TaskState } from "../task-state.js"
 import {
 	CanonicalReadmeError,
 	CanonicalReadmeWriter,
 	clearedFailureFields,
 	NO_FAILURE_ATTEMPTS,
 	NO_FAILURE_KEY,
-	NO_OWNER,
 	readmePath,
 	readCanonicalFields,
 	writeCanonicalFields,
 	writeReadmeAtomic,
 } from "../task-readme.js"
-import { createInMemoryFileSystem } from "./helpers/in-memory-fs.js"
+import { parseImplementationTask, type ImplementationArtifacts } from "../txx-parser.js"
+import { createInMemoryFileSystem, type InMemoryFileSystemHandle } from "./helpers/in-memory-fs.js"
 
 const taskRoot = path.join("/workspace", ".roo", "tasks", "SITESUP-1116")
 const canonicalReadme = `Protocol Version: 2
@@ -22,50 +25,78 @@ Current Task: NONE
 Next Step: Start implementation.
 `
 
+const taskContext: TaskContext = {
+	taskId: "SITESUP-1116",
+	branch: "feature/SITESUP-1116-heartbeat",
+	taskRoot,
+}
+
+function readyState(): TaskState {
+	return {
+		taskId: "SITESUP-1116",
+		status: "READY_FOR_IMPLEMENTATION",
+		currentTask: null,
+		currentTaskArtifact: null,
+		failureKey: null,
+		failureAttempts: 0,
+	}
+}
+
+/**
+ * Wraps the in-memory file system so every operation yields a microtask before
+ * touching the map. Two writers started together therefore interleave their
+ * read-modify-write steps unless the README lock serializes them. Microtasks
+ * (not timers) keep the test deterministic and free of real timers.
+ */
+function createInterleavingFileSystem(initial: Record<string, string>): InMemoryFileSystemHandle {
+	const base = createInMemoryFileSystem(initial)
+	const yieldToQueue = () => Promise.resolve()
+
+	return {
+		files: base.files,
+		readFile: async (filePath, encoding) => {
+			await yieldToQueue()
+			return base.readFile(filePath, encoding)
+		},
+		readdir: async (dirPath) => {
+			await yieldToQueue()
+			return base.readdir(dirPath)
+		},
+		writeFile: async (filePath, data, encoding) => {
+			await yieldToQueue()
+			return base.writeFile(filePath, data, encoding)
+		},
+		rename: async (oldPath, newPath) => {
+			await yieldToQueue()
+			return base.rename(oldPath, newPath)
+		},
+	}
+}
+
 describe("canonical README block", () => {
 	it("reads canonical values regardless of casing and surrounding whitespace", () => {
+		// A legacy `Owner:` line is unknown to the canonical block and must not
+		// surface as a field, but it must not break the read either.
 		const readme =
 			"protocol version: 2\n  status:   REVIEW_PASSED  \ncurrent task: NONE\nowner: code#01a0ccee\nnext step: Ship it.\nfailure key: auth-token-expiry\nfailure attempts: 2\n"
 
 		expect(readCanonicalFields(readme)).toEqual({
 			status: "REVIEW_PASSED",
 			currentTask: "NONE",
-			owner: "code#01a0ccee",
 			nextStep: "Ship it.",
 			failureKey: "auth-token-expiry",
 			failureAttempts: "2",
 		})
 	})
 
-	it("reports missing failure and owner fields as null", () => {
+	it("reports missing failure fields as null", () => {
 		expect(readCanonicalFields(canonicalReadme)).toEqual({
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
-			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
 		})
-	})
-
-	it("inserts a missing Owner field after Status in canonical order", () => {
-		const updated = writeCanonicalFields(canonicalReadme, { Owner: "code#01a0ccee" })
-
-		expect(updated).toBe(`Protocol Version: 2
-Task: SITESUP-1116
-Status: READY_FOR_IMPLEMENTATION
-Owner: code#01a0ccee
-Current Task: NONE
-Next Step: Start implementation.
-`)
-	})
-
-	it("clears the Owner field with the canonical sentinel and preserves the rest", () => {
-		const readme = "Status: IMPLEMENTATION\nCurrent Task: implementation/T02-worker.md\nOwner: code#01a0ccee\n"
-		const updated = writeCanonicalFields(readme, { Owner: NO_OWNER })
-
-		expect(updated).toContain("Owner: NONE")
-		expect(updated).toContain("Current Task: implementation/T02-worker.md")
 	})
 
 	it("inserts a missing failure block after the Status anchor", () => {
@@ -145,7 +176,6 @@ describe("CanonicalReadmeWriter", () => {
 		expect(update.before).toEqual({
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
-			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
@@ -153,7 +183,6 @@ describe("CanonicalReadmeWriter", () => {
 		expect(update.after).toEqual({
 			status: "REVIEW_PASSED",
 			currentTask: "NONE",
-			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
@@ -167,5 +196,61 @@ describe("CanonicalReadmeWriter", () => {
 
 		await expect(writer.update(taskRoot, { Status: "DONE" })).rejects.toThrow(CanonicalReadmeError)
 		expect(fileSystem.files.get(readmePath(taskRoot))).toBe("Task: SITESUP-1116\n")
+	})
+})
+
+describe("canonical README serialization", () => {
+	it("serializes concurrent updates of the same task root so neither is lost", async () => {
+		const fileSystem = createInterleavingFileSystem({ [readmePath(taskRoot)]: canonicalReadme })
+		const writer = new CanonicalReadmeWriter(fileSystem)
+
+		const [statusUpdate, taskUpdate] = await Promise.all([
+			writer.update(taskRoot, { Status: "REVIEW_PASSED" }),
+			writer.update(taskRoot, { "Current Task": "implementation/T02-worker.md" }),
+		])
+
+		expect(statusUpdate.after.status).toBe("REVIEW_PASSED")
+		expect(taskUpdate.after.currentTask).toBe("implementation/T02-worker.md")
+
+		const final = readCanonicalFields(fileSystem.files.get(readmePath(taskRoot)) ?? "")
+		expect(final.status).toBe("REVIEW_PASSED")
+		expect(final.currentTask).toBe("implementation/T02-worker.md")
+		// The unique temporary file is renamed away, never left behind.
+		expect([...fileSystem.files.keys()]).toEqual([readmePath(taskRoot)])
+	})
+
+	it("serializes a concurrent update and assignNext on the same task root", async () => {
+		const fileSystem = createInterleavingFileSystem({ [readmePath(taskRoot)]: canonicalReadme })
+		const writer = new CanonicalReadmeWriter(fileSystem)
+		const scheduler = new TaskScheduler(fileSystem)
+
+		const artifacts: ImplementationArtifacts = {
+			directory: path.join(taskRoot, "implementation"),
+			missingDirectory: false,
+			tasks: [
+				parseImplementationTask(
+					"T02-worker.md",
+					path.join(taskRoot, "implementation", "T02-worker.md"),
+					"## Status\nStatus: TODO\n",
+				),
+			],
+			duplicateIds: [],
+			unexpectedFiles: [],
+		}
+
+		const [update, assignment] = await Promise.all([
+			// Both writers read-modify-write the same README, so without the lock
+			// one of the two mutations can be lost.
+			writer.update(taskRoot, { "Next Step": "custom step" }),
+			scheduler.assignNext(taskContext, readyState(), artifacts),
+		])
+
+		expect(update.after.nextStep).toBe("custom step")
+		expect(assignment).not.toBeNull()
+
+		const final = readCanonicalFields(fileSystem.files.get(readmePath(taskRoot)) ?? "")
+		// The assignment must survive the concurrent writer.
+		expect(final.currentTask).toBe("implementation/T02-worker.md")
+		expect([...fileSystem.files.keys()]).toEqual([readmePath(taskRoot)])
 	})
 })

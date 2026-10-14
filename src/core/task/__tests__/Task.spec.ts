@@ -1526,64 +1526,6 @@ describe("Cline", () => {
 				expect(childAssign).not.toHaveBeenCalled()
 			})
 
-			it("reconciles when a resolve observes an active assignment without an owner", async () => {
-				const reconcile = vi.fn().mockResolvedValue({
-					phase: "taskState.observe",
-					consistent: true,
-					differences: [],
-					canonical: null,
-				})
-				const activeSnapshot: ImplementationArtifacts = {
-					...snapshot(),
-					tasks: snapshot().tasks.map((task) =>
-						task.id === "T04" ? { ...task, status: "IN_PROGRESS" as const } : task,
-					),
-				}
-				const taskState = {
-					taskId: "SITESUP-1116",
-					status: "IMPLEMENTATION" as const,
-					currentTask: "T04",
-					currentTaskArtifact: `${directory}/T04-a.md`,
-					failureKey: null,
-					failureAttempts: 0,
-				}
-				const task = new Task({
-					provider: mockProvider,
-					apiConfiguration: mockApiConfig,
-					task: "test task",
-					startTask: false,
-					taskResolver: { resolve: vi.fn().mockResolvedValue(taskContext) },
-					taskStateResolver: { resolve: vi.fn().mockResolvedValue(taskState) },
-					artifactValidator: {
-						validate: vi.fn().mockResolvedValue({
-							issues: [],
-							errors: [],
-							warnings: [],
-							valid: true,
-							artifacts: activeSnapshot,
-						}),
-					},
-					taskScheduler: { assignNext: vi.fn().mockResolvedValue(null) },
-					txxParser: { read: vi.fn().mockResolvedValue(activeSnapshot) },
-					stateReconciler: { reconcile },
-				})
-				vi.spyOn(mockProvider, "getState").mockResolvedValue({
-					mode: "code",
-					mcpEnabled: false,
-				} as unknown as ProviderState)
-				await task.getTaskMode()
-				vi.mocked(SYSTEM_PROMPT).mockResolvedValue("mock system prompt")
-
-				await getTaskTestAccess(task).getSystemPrompt()
-
-				expect(reconcile).toHaveBeenCalledTimes(1)
-				const [, , options] = requireDefined(reconcile.mock.calls[0])
-				expect(options).toMatchObject({
-					phase: "taskState.observe",
-					owner: { mode: null, agentTaskId: null, active: false },
-				})
-			})
-
 			it("reports the assigned unit as txxId only after a resolve", async () => {
 				const { task } = buildTask("IMPLEMENTATION")
 				vi.spyOn(mockProvider, "getState").mockResolvedValue({

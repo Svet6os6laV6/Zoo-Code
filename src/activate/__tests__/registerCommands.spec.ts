@@ -2,7 +2,13 @@ import type { Mock } from "vitest"
 import * as vscode from "vscode"
 import { ClineProvider } from "../../core/webview/ClineProvider"
 
-import { getVisibleProviderOrLog, openClineInNewTab, registerCommands, setPanel } from "../registerCommands"
+import {
+	getVisibleProviderOrLog,
+	openClineInNewTab,
+	registerCommands,
+	setPanel,
+	type HarnessCommandHandlers,
+} from "../registerCommands"
 
 vi.mock("execa", () => ({
 	execa: vi.fn(),
@@ -135,11 +141,17 @@ describe("registerCommands handlers", () => {
 	let mockContext: vscode.ExtensionContext
 	let mockVisibleProvider: { postMessageToWebview: Mock; resumeBlockedTask: Mock; approvePlanTask: Mock }
 	let mockProvider: { postMessageToWebview: Mock }
+	let mockHarness: HarnessCommandHandlers
 	let handlers: Record<string, (...args: unknown[]) => unknown>
 
 	beforeEach(() => {
 		vi.clearAllMocks()
 		handlers = {}
+
+		mockHarness = {
+			openLogViewer: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+			registerMcpServer: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+		}
 
 		mockOutputChannel = {
 			appendLine: vi.fn(),
@@ -177,6 +189,7 @@ describe("registerCommands handlers", () => {
 			context: mockContext,
 			outputChannel: mockOutputChannel,
 			provider: mockProvider as unknown as ClineProvider,
+			harness: mockHarness,
 		})
 	})
 
@@ -421,6 +434,26 @@ describe("registerCommands handlers", () => {
 		await handlers["zoo-code.approvePlan"]()
 
 		expect(mockVisibleProvider.approvePlanTask).not.toHaveBeenCalled()
+	})
+
+	it("openHarnessLogViewer delegates to the injected log viewer handler", async () => {
+		expect(handlers["zoo-code.openHarnessLogViewer"]).toBeDefined()
+
+		await handlers["zoo-code.openHarnessLogViewer"]()
+
+		expect(mockHarness.openLogViewer).toHaveBeenCalledTimes(1)
+	})
+
+	it("registerHarnessLogsMcp delegates to the injected MCP registration handler", async () => {
+		expect(handlers["zoo-code.registerHarnessLogsMcp"]).toBeDefined()
+
+		await handlers["zoo-code.registerHarnessLogsMcp"]()
+
+		expect(mockHarness.registerMcpServer).toHaveBeenCalledTimes(1)
+	})
+
+	it("does not register the removed unregisterHarnessLogsMcp command", () => {
+		expect(handlers["zoo-code.unregisterHarnessLogsMcp"]).toBeUndefined()
 	})
 })
 

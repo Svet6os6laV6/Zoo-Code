@@ -62,21 +62,14 @@ import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService } from "@roo-code/cloud"
 import {
 	ArtifactValidator,
-	CanonicalReadmeWriter,
 	diffImplementationArtifacts,
-	LIFECYCLE_MODES,
-	NO_OWNER,
-	readCanonicalFields,
-	StateReconciler,
 	TaskResolver,
 	TaskScheduler,
 	TaskStateError,
 	TaskStateResolver,
 	TxxParser,
 	harnessLogger,
-	isActiveAssignment,
 	type ArtifactValidationIssue,
-	type AssignmentOwnerContext,
 	type HarnessLogContextInput,
 	type HarnessLoggerPort,
 	type ImplementationArtifacts,
@@ -177,7 +170,6 @@ const defaultTaskResolver = new TaskResolver()
 const defaultTaskStateResolver = new TaskStateResolver()
 const defaultArtifactValidator = new ArtifactValidator()
 const defaultTaskScheduler = new TaskScheduler()
-const defaultStateReconciler = new StateReconciler()
 const defaultTxxParser = new TxxParser()
 
 /**
@@ -267,8 +259,6 @@ export interface TaskOptions extends CreateTaskOptions {
 	taskScheduler?: Pick<TaskScheduler, "assignNext">
 	/** Reads the implementation snapshot once per resolve, shared by validator and scheduler. */
 	txxParser?: Pick<TxxParser, "read">
-	/** Diagnostic comparison between the runtime state and the canonical artifacts. */
-	stateReconciler?: Pick<StateReconciler, "reconcile">
 	/** Explicit logger injection; defaults to the process-wide harness logger. */
 	harnessLogger?: HarnessLoggerPort
 }
@@ -589,7 +579,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly artifactValidator: Pick<ArtifactValidator, "validate">
 	private readonly taskScheduler: Pick<TaskScheduler, "assignNext">
 	private readonly txxParser: Pick<TxxParser, "read">
-	private readonly stateReconciler: Pick<StateReconciler, "reconcile">
 	private readonly harnessLogger?: HarnessLoggerPort
 	private taskContextPromise?: Promise<TaskContext>
 	/**
@@ -654,7 +643,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		artifactValidator = defaultArtifactValidator,
 		taskScheduler = defaultTaskScheduler,
 		txxParser = defaultTxxParser,
-		stateReconciler = defaultStateReconciler,
 		harnessLogger: harnessLoggerOverride,
 	}: TaskOptions) {
 		super()
@@ -723,7 +711,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.artifactValidator = artifactValidator
 		this.taskScheduler = taskScheduler
 		this.txxParser = txxParser
-		this.stateReconciler = stateReconciler
 		this.harnessLogger = harnessLoggerOverride
 		this.taskNumber = taskNumber
 		this.initialStatus = initialStatus
@@ -4465,48 +4452,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	/**
-	 * Diagnostic hook for important transitions (mode switch): re-read the
-	 * canonical artifacts and compare them with a freshly resolved state.
-	 * Never mutates and never throws.
-	 */
-	public async reconcileHarnessState(phase: string): Promise<void> {
-		const logger = harnessLogger(this.harnessLogger)
-		let taskContext: TaskContext | undefined
-
-		try {
-			// Bind the lifecycle context first: a reconciliation triggered by a mode
-			// transition must land in the same trace as the task it observes, rather
-			// than being emitted with the unbound fallback identity.
-			const harnessContext = await this.getHarnessLogContext()
-			const resolved = await this.getTaskContext()
-			taskContext = resolved
-
-			await logger.runWithContext(harnessContext, async () => {
-				const taskState = await this.taskStateResolver.resolve(resolved)
-
-				await this.stateReconciler.reconcile(resolved, taskState, {
-					phase,
-					logger,
-					context: {
-						taskId: resolved.taskId,
-						agentTaskId: this.taskId,
-						txxId: taskState.currentTask,
-					},
-				})
-			})
-		} catch (error) {
-			logger.event("harness.state.reconcile.failed", {
-				level: "warn",
-				context: { taskId: taskContext?.taskId ?? null, agentTaskId: this.taskId },
-				attributes: {
-					phase,
-					error: error instanceof Error ? error.message : String(error),
-				},
-			})
-		}
-	}
-
-	/**
 	 * Record artifact mutations the harness did not perform itself.
 	 *
 	 * Between two resolves the model (or a tool acting for it) edits the canonical
@@ -4704,24 +4649,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 				}
 
-				// Keep the canonical `Owner` lease in step with the executor that holds
-				// it. Diagnostic only: a failure here must not change the resolve.
-				const ownerValue = readmeRejected
-					? null
-					: await this.syncAssignmentOwner(taskContext, taskState, snapshot, readme)
-
-				// A resolve that observes a unit being executed is a reconcile trigger
-				// even when nothing was assigned: the assignment may have been written by
-				// another resolve and left without an executor (F8).
-				const activeUnit = taskState.currentTask
-					? snapshot.tasks.find((task) => task.id === taskState.currentTask)
-					: undefined
-				const observesActiveAssignment = isActiveAssignment(
-					taskState.status,
-					taskState.currentTask,
-					activeUnit?.status,
-				)
-
 				span.annotate({
 					status: taskState.status,
 					currentTask: taskState.currentTask,
@@ -4744,39 +4671,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// so the next resolve can short-circuit before the parse.
 				this.lastStatFingerprint = statFingerprint
 				this.lastResolvedResult = { taskState, artifactIssues }
-
-				// Diagnostic only: compare the runtime view with the canonical artifacts
-				// after a transition. The reconciler never mutates and never throws.
-				if (assigned || readmeRejected || observesActiveAssignment) {
-					const phase = assigned
-						? "scheduler.assignNext"
-						: readmeRejected
-							? "taskState.fallback"
-							: "taskState.observe"
-
-					try {
-						await this.stateReconciler.reconcile(taskContext, taskState, {
-							phase,
-							logger,
-							owner: this.assignmentOwnerContext(ownerValue),
-							context: {
-								taskId: taskContext.taskId,
-								agentTaskId: this.taskId,
-								txxId: taskState.currentTask,
-							},
-						})
-					} catch (error) {
-						// A failing diagnostic must not change the outcome it observes.
-						logger.event("harness.state.reconcile.failed", {
-							level: "warn",
-							context: { taskId: taskContext.taskId },
-							attributes: {
-								phase,
-								error: error instanceof Error ? error.message : String(error),
-							},
-						})
-					}
-				}
 
 				return { taskState, artifactIssues }
 			},
@@ -4832,102 +4726,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		return { readme, implementation }
-	}
-
-	/**
-	 * Keep the canonical `Owner` lease in step with the executor that holds it.
-	 *
-	 * The lease is diagnostic only: it records which task is running the assigned
-	 * unit so `StateReconciler` can flag an assignment with no active owner. A
-	 * delegated stage-child is leased by the harness when it starts; a root task
-	 * that runs a stage itself (the harness did not delegate) leases itself on its
-	 * first resolve. The lease is released when the unit finishes, but only by the
-	 * task that holds it, so a finishing executor never clears the lease of the
-	 * stage that already replaced it.
-	 *
-	 * Returns the effective canonical `Owner` value, or `null` when the README is
-	 * unreadable. Never throws: a diagnostic must not change the resolve.
-	 */
-	private async syncAssignmentOwner(
-		taskContext: TaskContext,
-		taskState: TaskState,
-		snapshot: ImplementationArtifacts,
-		readme: string | null,
-	): Promise<string | null> {
-		if (readme === null) {
-			return null
-		}
-
-		const currentOwner = readCanonicalFields(readme).owner
-
-		try {
-			const mode = await this.getTaskMode()
-			if (!LIFECYCLE_MODES.some((lifecycleMode) => lifecycleMode === mode)) {
-				return currentOwner
-			}
-
-			const lease = `${mode}#${this.taskId}`
-			const unit = taskState.currentTask
-				? snapshot.tasks.find((task) => task.id === taskState.currentTask)
-				: undefined
-			const activeAssignment = isActiveAssignment(taskState.status, taskState.currentTask, unit?.status)
-
-			if (activeAssignment) {
-				if (currentOwner !== lease) {
-					await this.writeAssignmentOwner(taskContext, lease)
-					return lease
-				}
-
-				return currentOwner
-			}
-
-			if (currentOwner === lease) {
-				await this.writeAssignmentOwner(taskContext, NO_OWNER)
-				return NO_OWNER
-			}
-
-			return currentOwner
-		} catch (error) {
-			harnessLogger(this.harnessLogger).event("harness.assignment.owner.failed", {
-				level: "warn",
-				context: { taskId: taskContext.taskId, agentTaskId: this.taskId },
-				attributes: { error: error instanceof Error ? error.message : String(error) },
-			})
-			return currentOwner
-		}
-	}
-
-	private async writeAssignmentOwner(taskContext: TaskContext, owner: string): Promise<void> {
-		await new CanonicalReadmeWriter().update(taskContext.taskRoot, { Owner: owner })
-	}
-
-	/**
-	 * Describe the canonical `Owner` lease for the reconciler.
-	 *
-	 * The reconciler never reads the task history, so the activity of the owner is
-	 * resolved here: the lease is active when it names this task (it is running) or
-	 * the provider's current task (the single-open-task invariant means only one
-	 * task is active at a time).
-	 */
-	private assignmentOwnerContext(owner: string | null): AssignmentOwnerContext {
-		if (!owner || owner === NO_OWNER) {
-			return { mode: null, agentTaskId: null, active: false }
-		}
-
-		const separator = owner.indexOf("#")
-		const mode = separator === -1 ? owner : owner.slice(0, separator)
-		const agentTaskId = separator === -1 ? null : owner.slice(separator + 1)
-		const active = agentTaskId !== null && this.isAssignmentOwnerActive(agentTaskId)
-
-		return { mode, agentTaskId, active }
-	}
-
-	private isAssignmentOwnerActive(agentTaskId: string): boolean {
-		if (agentTaskId === this.taskId) {
-			return true
-		}
-
-		return this.providerRef.deref()?.getCurrentTask()?.taskId === agentTaskId
 	}
 
 	private getCurrentProfileId(state: any): string {

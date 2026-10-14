@@ -32,6 +32,7 @@ vi.mock("vscode", () => ({
 	},
 	commands: {
 		executeCommand: vi.fn(),
+		registerCommand: vi.fn(),
 	},
 	env: {
 		language: "en",
@@ -265,6 +266,32 @@ describe("extension.ts", () => {
 		await activate(mockContext)
 
 		expect(dotenv.config).toHaveBeenCalledTimes(1)
+	})
+
+	describe("harness commands", () => {
+		beforeEach(() => {
+			vi.resetModules()
+		})
+
+		test("registers the harness commands through registerCommands instead of directly", async () => {
+			const { registerCommands } = await import("../activate")
+			const vscode = await import("vscode")
+
+			const { activate } = await import("../extension")
+			await activate(mockContext)
+
+			expect(vi.mocked(registerCommands)).toHaveBeenCalledWith(
+				expect.objectContaining({
+					harness: {
+						openLogViewer: expect.any(Function),
+						registerMcpServer: expect.any(Function),
+					},
+				}),
+			)
+			// The shared map is the only registration mechanism: activation must not
+			// call `registerCommand` on its own.
+			expect(vi.mocked(vscode.commands.registerCommand)).not.toHaveBeenCalled()
+		})
 	})
 
 	describe("cloud organization settings handling", () => {

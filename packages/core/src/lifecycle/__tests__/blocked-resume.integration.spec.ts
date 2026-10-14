@@ -16,26 +16,23 @@ const controller = new LifecycleController()
 /**
  * The regression for the BLOCKED deadlock: a task that stopped at `BLOCKED` (an
  * external cause) must be resumable through the harness-owned resume action. The
- * resume returns it to the implementation queue, clears the blocker's failure
- * tracking, and the scheduler assigns the next ready unit — the same recovery the
- * reported task needed.
+ * `stop` at `BLOCKED` parks the assigned unit before the write clears
+ * `Current Task`, so the resume returns the task to the implementation queue,
+ * clears the blocker's failure tracking, and the scheduler hands the same unit
+ * back — the recovery the reported task needed.
  */
 describe("BLOCKED resume", () => {
-	it("returns a blocked task to the implementation queue and assigns the next ready unit", async () => {
+	it("parks the assigned unit at BLOCKED and reassigns it on resume", async () => {
 		const fileSystem = createInMemoryFileSystem({
 			[readmePath]: `Protocol Version: 2
 Task: SITESUP-1119
-Status: BLOCKED
-Current Task: NONE
-Next Step: Implement T02 (implementation/T02-multi-channel-delivery.md).
-Failure Key: blocked-external
-Failure Attempts: 1
+Status: IMPLEMENTATION
+Current Task: implementation/T03-max-client-config.md
+Next Step: Implement T03 (implementation/T03-max-client-config.md).
+Failure Key: NONE
+Failure Attempts: 0
 `,
-			// Mirrors the reported state: the assigned unit is parked, its channel
-			// dependency (T03) is the only unit that is ready.
-			[path.join(implementation, "T02-multi-channel-delivery.md")]:
-				"## Status\nStatus: TODO\n\n## Relationships\n\n- Depends on: T01, T03\n",
-			[path.join(implementation, "T03-max-client-config.md")]: "## Status\nStatus: TODO\n",
+			[path.join(implementation, "T03-max-client-config.md")]: "## Status\nStatus: IN_PROGRESS\n",
 		})
 		const resolver = new TaskStateResolver(fileSystem)
 		const starts: string[] = []
@@ -48,12 +45,32 @@ Failure Attempts: 1
 		)
 
 		const state = await resolver.resolve(context)
-		expect(state.status).toBe("BLOCKED")
+		expect(state.status).toBe("IMPLEMENTATION")
+		expect(state.currentTaskArtifact).toBe(path.join(implementation, "T03-max-client-config.md"))
 
-		const decision = controller.resume(state, true)
+		// Code reports a cause the harness cannot remove on its own.
+		const blocked = controller.transition(state, { mode: "code", result: "BLOCKED", failureKey: null })
+		expect(blocked).toEqual({ type: "stop", status: "BLOCKED", reason: "blocked" })
+
+		const stopped = await runner.run(context, state, blocked)
+		expect(stopped).toEqual({ type: "stopped", status: "BLOCKED", reason: "blocked" })
+		expect(starts).toEqual([])
+
+		// The assignment is parked before `Current Task` is cleared, so the unit is
+		// ready for the DAG instead of stranded as `current-unit-unfinished`.
+		expect(fileSystem.files.get(path.join(implementation, "T03-max-client-config.md"))).toContain("Status: TODO")
+		const blockedReadme = fileSystem.files.get(readmePath) ?? ""
+		expect(blockedReadme).toContain("Status: BLOCKED")
+		expect(blockedReadme).toContain("Current Task: NONE")
+
+		// A confirmed Unblock Condition resumes the task and assigns T03 again.
+		const blockedState = await resolver.resolve(context)
+		expect(blockedState.status).toBe("BLOCKED")
+
+		const decision = controller.resume(blockedState, true)
 		expect(decision).toEqual({ type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" })
 
-		const result = await runner.run(context, state, decision)
+		const result = await runner.run(context, blockedState, decision)
 		expect(result).toEqual({ type: "started", mode: "code", status: "IMPLEMENTATION" })
 		expect(starts).toEqual(["code"])
 

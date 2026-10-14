@@ -70,13 +70,8 @@ import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTa
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
 import {
-	CanonicalReadmeWriter,
 	LIFECYCLE_MODES,
 	LifecycleError,
-	NO_CURRENT_TASK,
-	NO_OWNER,
-	readCanonicalFields,
-	readmePath,
 	TaskStateResolver,
 	harnessLogger,
 	type HarnessLogContextInput,
@@ -244,26 +239,6 @@ export async function startTaskUnlessLifecycleAdvanced(
 	}
 
 	scheduleTask(scheduler, task, source)
-}
-
-/**
- * Best-effort harness reconciliation after an important transition.
- *
- * The reconciliation is diagnostic only: it must never affect the transition it
- * observes, and test doubles for `Task` may not implement it at all.
- */
-async function runHarnessReconciliation(task: Task, phase: string): Promise<void> {
-	const reconcile = (task as { reconcileHarnessState?: (phase: string) => Promise<void> }).reconcileHarnessState
-
-	if (typeof reconcile !== "function") {
-		return
-	}
-
-	try {
-		await reconcile.call(task, phase)
-	} catch {
-		// The reconciler logs its own failures; a diagnostic must not surface here.
-	}
 }
 
 type GetStateOptions = {
@@ -1881,12 +1856,6 @@ export class ClineProvider
 					taskScoped: Boolean(task),
 				},
 			})
-
-			// Diagnostic only: a mode transition is a good moment to verify that the
-			// runtime view still matches the canonical task artifacts.
-			if (task) {
-				await runHarnessReconciliation(task, "mode.transition")
-			}
 		})
 
 		// If workspace lock is on, keep the current API config — don't load mode-specific config
@@ -3710,24 +3679,6 @@ export class ClineProvider
 		// Immediately mark the original instance as abandoned to prevent any residual activity
 		task.abandoned = true
 
-		// The cancelled task no longer holds the assignment lease. Release it so a
-		// later resolve does not report a stale owner as active. Best effort: a
-		// failure must not change the cancellation.
-		try {
-			const context = await task.getTaskContext()
-			const mode = await task.getTaskMode().catch(() => null)
-
-			if (mode) {
-				await this.clearAssignmentOwner(context.taskRoot, `${mode}#${task.taskId}`)
-			}
-		} catch (error) {
-			this.log(
-				`[cancelTask] Failed to release the assignment owner for ${task.taskId}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			)
-		}
-
 		await pWaitFor(
 			() =>
 				this.getCurrentTask()! === undefined ||
@@ -4247,18 +4198,12 @@ export class ClineProvider
 			async (mode, message) => {
 				await this.assertLifecycleModeConfigured(mode)
 
-				const child = await this.delegateParentAndOpenChild({
+				await this.delegateParentAndOpenChild({
 					parentTaskId,
 					message,
 					initialTodos: [],
 					mode,
 				})
-
-				// Record the executor lease as soon as the stage-child exists, so an
-				// assignment is never left ownerless between the delegation and the
-				// child's first resolve. Diagnostic only: a failure must not stop the
-				// stage from starting.
-				await this.recordExecutorOwner(child, mode)
 			},
 			// The root harness logger carries the configured sinks; the runner binds
 			// the task's trace context per call, so lifecycle mutation records land in
@@ -4276,62 +4221,6 @@ export class ClineProvider
 		const { customModes } = await this.getState()
 		if (!getModeBySlug(mode, customModes)) {
 			throw new LifecycleError(`Lifecycle mode is not configured: ${mode}`)
-		}
-	}
-
-	/**
-	 * Record the canonical `Owner` lease for a stage-child the harness just started.
-	 *
-	 * The lease is diagnostic only (see `StateReconciler`): it names the task that
-	 * is running the assigned unit. It is written only when the canonical state
-	 * actually assigns a unit, so a stage that runs without an assignment (for
-	 * example Refactor after the DAG is exhausted) does not claim one. Best effort:
-	 * a failure must not stop the stage from starting.
-	 */
-	private async recordExecutorOwner(task: Task, mode: string): Promise<void> {
-		try {
-			const context = await task.getTaskContext()
-			const readme = await fs.readFile(readmePath(context.taskRoot), "utf8")
-			const current = readCanonicalFields(readme)
-
-			if (
-				current.status !== "IMPLEMENTATION" ||
-				!current.currentTask ||
-				current.currentTask === NO_CURRENT_TASK
-			) {
-				return
-			}
-
-			await new CanonicalReadmeWriter().update(context.taskRoot, { Owner: `${mode}#${task.taskId}` })
-		} catch (error) {
-			this.log(
-				`[recordExecutorOwner] Failed to record the assignment owner for ${task.taskId}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			)
-		}
-	}
-
-	/**
-	 * Release the canonical `Owner` lease held by `owner` (for example
-	 * `<childMode>#<childTaskId>`), leaving a lease held by another task intact.
-	 * Best effort: a failure must not change the transition it observes.
-	 */
-	private async clearAssignmentOwner(taskRoot: string, owner: string): Promise<void> {
-		try {
-			const readme = await fs.readFile(readmePath(taskRoot), "utf8")
-
-			if (readCanonicalFields(readme).owner !== owner) {
-				return
-			}
-
-			await new CanonicalReadmeWriter().update(taskRoot, { Owner: NO_OWNER })
-		} catch (error) {
-			this.log(
-				`[clearAssignmentOwner] Failed to release the assignment owner ${owner}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			)
 		}
 	}
 
@@ -4355,18 +4244,34 @@ export class ClineProvider
 	 * and a top-level lifecycle task that is starting (the canonical state alone
 	 * decides then).
 	 *
-	 * Returns `true` only when the harness actually started the next stage. Every
-	 * other outcome — a non-lifecycle mode, a task that is itself a delegated
-	 * stage, a task that already has a stage in flight, a state the resolver cannot
-	 * advance, or a routing failure — returns `false`, so the caller keeps its
-	 * existing path (completion ask, resume path, ordinary task start) instead of
-	 * writing state.
+	 * Returns `true` only when the harness actually started the next stage
+	 * (`result.type === "started"`). Every other outcome — a non-lifecycle mode, a
+	 * task that is itself a delegated stage, a task that already has a stage in
+	 * flight, a state the resolver cannot advance, a routing failure, or a
+	 * `stopped` result (the lifecycle reached its terminal `DONE`, is waiting for
+	 * plan approval, is blocked, or exhausted its attempts) — returns `false`, so
+	 * the caller keeps its existing path (completion ask, resume path, ordinary
+	 * task start) instead of writing state.
 	 */
 	public async continueTaskLifecycle(task: Task, resultText?: string): Promise<boolean> {
+		return (await this.advanceTaskLifecycle(task, resultText)) === "advanced"
+	}
+
+	/**
+	 * The richer form of {@link continueTaskLifecycle}: it distinguishes a started
+	 * stage from a lifecycle that stopped at its terminal `DONE` state, so the
+	 * "continue lifecycle" command can report completion instead of the generic
+	 * "cannot be advanced" message. Every other outcome collapses to
+	 * `"not-advanced"`, which is exactly the `false` of the boolean contract.
+	 */
+	private async advanceTaskLifecycle(
+		task: Task,
+		resultText?: string,
+	): Promise<"advanced" | "stopped-done" | "not-advanced"> {
 		// Only the stage that owns the chain may advance it: a delegated child was
 		// started *by* the chain and must run its own stage to completion.
 		if (task.parentTaskId) {
-			return false
+			return "not-advanced"
 		}
 
 		let mode: string
@@ -4378,7 +4283,7 @@ export class ClineProvider
 					error instanceof Error ? error.message : String(error)
 				}`,
 			)
-			return false
+			return "not-advanced"
 		}
 
 		// A stage outcome (`resultText`) is only meaningful for a lifecycle mode:
@@ -4387,7 +4292,7 @@ export class ClineProvider
 		// in any mode (for example `orchestrator`) may continue. The
 		// `hasStageInFlight` guard below still prevents a second parallel chain.
 		if (resultText !== undefined && !isLifecycleMode(mode)) {
-			return false
+			return "not-advanced"
 		}
 
 		try {
@@ -4396,7 +4301,7 @@ export class ClineProvider
 			// a parallel chain over the same README, so the harness declines and the
 			// caller falls back to its existing path.
 			if (this.hasStageInFlight(task.taskId)) {
-				return false
+				return "not-advanced"
 			}
 
 			const runner = this.harnessModeRunner(task.taskId)
@@ -4416,14 +4321,32 @@ export class ClineProvider
 				)
 			}
 
-			return result !== null
+			// Only a started stage is an advance. A `stopped` result means the
+			// lifecycle reached a terminal or gated state (`DONE`, `PLAN_READY`,
+			// `BLOCKED`, `QA_READY`, max-attempts) and the caller must keep its
+			// ordinary path — in particular the completion ask on `DONE`, so the
+			// top-level task finishes instead of staying active.
+			if (result?.type === "started") {
+				return "advanced"
+			}
+
+			if (result?.type === "stopped" && result.status === "DONE") {
+				return "stopped-done"
+			}
+
+			return "not-advanced"
 		} catch (error) {
+			// The runner starts the stage before it writes the canonical status, so a
+			// failure here (a stage that could not be created, or a status write that
+			// failed after the stage started) leaves the README at its previous
+			// canonical state. "Keeping the existing path" is therefore accurate: the
+			// legacy resume path can retry from that state.
 			this.log(
 				`[continueTaskLifecycle] Lifecycle routing failed for ${task.taskId}: ${
 					error instanceof Error ? error.message : String(error)
 				}. Keeping the existing path.`,
 			)
-			return false
+			return "not-advanced"
 		}
 	}
 
@@ -4432,7 +4355,8 @@ export class ClineProvider
 	 *
 	 * Recovery path for a chain that stopped without a stage outcome to react to
 	 * (for example after a restart): the resolver decides from the canonical state
-	 * alone whether the next stage may start.
+	 * alone whether the next stage may start. A lifecycle that already reached its
+	 * terminal `DONE` is reported as complete rather than as "cannot be advanced".
 	 */
 	public async continueTaskLifecycleFromCommand(): Promise<void> {
 		const task = this.getCurrentTask()
@@ -4441,7 +4365,14 @@ export class ClineProvider
 			return
 		}
 
-		if (await this.continueTaskLifecycle(task)) {
+		const outcome = await this.advanceTaskLifecycle(task)
+
+		if (outcome === "advanced") {
+			return
+		}
+
+		if (outcome === "stopped-done") {
+			await vscode.window.showInformationMessage(`Task ${task.taskId} lifecycle is complete.`)
 			return
 		}
 
@@ -4918,22 +4849,6 @@ export class ClineProvider
 
 			// 8) Inject restored histories into the in-memory instance before resuming
 			if (parentInstance) {
-				// The completed child no longer holds the assignment lease. Release it
-				// before the next stage starts, so a late release cannot clear the lease
-				// the new stage is about to claim.
-				if (childHistory?.mode) {
-					try {
-						const context = await parentInstance.getTaskContext()
-						await this.clearAssignmentOwner(context.taskRoot, `${childHistory.mode}#${childTaskId}`)
-					} catch (error) {
-						this.log(
-							`[reopenParentFromDelegation] Failed to release the assignment owner for child ${childTaskId}: ${
-								error instanceof Error ? error.message : String(error)
-							}`,
-						)
-					}
-				}
-
 				try {
 					await parentInstance.overwriteClineMessages(parentClineMessages, false)
 				} catch {

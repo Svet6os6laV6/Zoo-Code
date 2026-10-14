@@ -23,11 +23,11 @@ import { harnessLogger } from "../observability/harness-logger.js"
 import type { HarnessLoggerPort } from "../observability/types.js"
 
 import {
+	CanonicalReadmeError,
+	CanonicalReadmeWriter,
 	clearedFailureFields,
-	readCanonicalFields,
 	readmePath,
-	writeCanonicalFields,
-	writeReadmeAtomic,
+	type CanonicalReadmeUpdate,
 } from "./task-readme.js"
 import type { TaskContext } from "./task-resolver.js"
 import type { TaskState } from "./task-state.js"
@@ -184,20 +184,34 @@ export class TaskScheduler {
 
 		const relativeArtifact = `implementation/${next.fileName}`
 		const readmeFilePath = readmePath(context.taskRoot)
-		const readme = await this.fileSystem.readFile(readmeFilePath, "utf8")
-		const updated = this.writeAssignment(readme, relativeArtifact, next.id)
+		const writer = new CanonicalReadmeWriter(this.fileSystem)
 
-		if (updated === null) {
-			return skip(
-				"README has no canonical Status line; mutating an unrecognized layout is unsafe",
-				"readme-layout-unrecognized",
-				{ readmePath: readmeFilePath },
-			)
+		let update: CanonicalReadmeUpdate
+		try {
+			// The read-modify-write runs inside the shared per-taskRoot lock, so a
+			// concurrent lifecycle write cannot interleave between the read and the
+			// rename. Handing a fresh implementation unit to Code ends any remediation
+			// that was in flight, so the failure-tracking block is cleared with the
+			// assignment rather than left behind for the next stage to misread.
+			update = await writer.update(context.taskRoot, {
+				Status: "IMPLEMENTATION",
+				"Current Task": relativeArtifact,
+				"Next Step": `Implement ${next.id} (${relativeArtifact}).`,
+				...clearedFailureFields(),
+			})
+		} catch (error) {
+			if (error instanceof CanonicalReadmeError) {
+				return skip(
+					"README has no canonical Status line; mutating an unrecognized layout is unsafe",
+					"readme-layout-unrecognized",
+					{ readmePath: readmeFilePath },
+				)
+			}
+			throw error
 		}
 
-		const stateBefore = readCanonicalFields(readme)
-		await writeReadmeAtomic(this.fileSystem, readmeFilePath, updated)
-		const stateAfter = readCanonicalFields(updated)
+		const stateBefore = update.before
+		const stateAfter = update.after
 
 		const assignment: TaskAssignment = {
 			task: next,
@@ -226,7 +240,7 @@ export class TaskScheduler {
 		})
 
 		logger.mutation("harness.scheduler.assignNext", {
-			target: readmeFilePath,
+			target: update.filePath,
 			stateBefore,
 			stateAfter,
 			reason: `wrote the canonical assignment for ${next.id} into the task README`,
@@ -235,22 +249,5 @@ export class TaskScheduler {
 		})
 
 		return assignment
-	}
-
-	/**
-	 * Rewrite the canonical README fields through the shared block writer.
-	 * Returns `null` when the README has no canonical `Status` line, because
-	 * mutating an unrecognized layout is unsafe.
-	 */
-	private writeAssignment(readme: string, relativeArtifact: string, taskId: string): string | null {
-		// Handing a fresh implementation unit to Code ends any remediation that was in
-		// flight, so the failure-tracking block is cleared with the assignment rather
-		// than left behind for the next stage to misread.
-		return writeCanonicalFields(readme, {
-			Status: "IMPLEMENTATION",
-			"Current Task": relativeArtifact,
-			"Next Step": `Implement ${taskId} (${relativeArtifact}).`,
-			...clearedFailureFields(),
-		})
 	}
 }

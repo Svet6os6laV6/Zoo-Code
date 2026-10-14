@@ -33,31 +33,6 @@ type TaskResolverFileSystem = {
 	mkdir(dirPath: string, options: { recursive: true }): Promise<string | undefined>
 }
 
-/** Input recorded on every `harness.task.resolve` record of one resolve call. */
-type ResolveInput = {
-	readonly workspacePath: string
-	readonly taskIdPattern: string
-}
-
-/**
- * Per-call context shared by the resolution steps: the branch being resolved,
- * the decision input, and the logger.
- */
-type ResolveScope = {
-	/** Current Git branch, already known to be non-null. */
-	readonly branch: string
-	readonly input: ResolveInput
-	readonly logger: HarnessLoggerPort
-}
-
-/** A rejected decision: the record to emit together with the error to throw. */
-type Rejection = {
-	readonly reason: string
-	readonly reasonCode: string
-	readonly message: string
-	readonly attributes?: Readonly<Record<string, unknown>>
-}
-
 /**
  * Fallback task ID for branches without a pattern match: the full branch name
  * with every character outside `[A-Za-z0-9._-]` replaced by `-`, run-together
@@ -89,34 +64,25 @@ export class TaskResolver {
 
 	async resolve(context: TaskResolveContext): Promise<TaskContext> {
 		const logger = harnessLogger(this.logger)
-		const input = { workspacePath: context.workspacePath, taskIdPattern: this.taskIdPattern.source }
-
 		const branch = await this.git.getCurrentBranch(context.workspacePath)
+
 		if (!branch) {
-			logger.decision("harness.task.resolve", {
-				level: "warn",
-				input,
-				result: null,
+			this.reject(logger, null, {
+				reasonCode: "no-branch",
 				reason: "current Git branch could not be determined",
-				attributes: { reasonCode: "no-branch" },
+				message: UNRESOLVED_TASK_MESSAGE,
 			})
-			throw new TaskResolutionError(UNRESOLVED_TASK_MESSAGE)
 		}
 
-		const scope: ResolveScope = { branch, input, logger }
-		const { taskId, reason, reasonCode } = this.resolveTaskId(scope)
+		const { taskId, reason, reasonCode } = this.resolveTaskId(logger, branch)
 		const taskRoot = path.join(path.resolve(context.workspacePath), ".roo", "tasks", taskId)
 
-		await this.ensureTaskRoot(taskRoot, taskId, scope)
+		await this.ensureTaskRoot(logger, taskRoot, taskId, branch)
 
-		const resolved: TaskContext = {
-			taskId,
-			branch,
-			taskRoot,
-		}
+		const resolved: TaskContext = { taskId, branch, taskRoot }
 
 		logger.decision("harness.task.resolve", {
-			input: { ...input, branch },
+			input: { branch },
 			result: resolved,
 			reason,
 			attributes: { reasonCode, branch, taskId },
@@ -131,8 +97,10 @@ export class TaskResolver {
 	 * `taskIdPattern` wins, and a branch without any match falls back to its
 	 * sanitized name.
 	 */
-	private resolveTaskId(scope: ResolveScope): { taskId: string; reason: string; reasonCode: string } {
-		const { branch } = scope
+	private resolveTaskId(
+		logger: HarnessLoggerPort,
+		branch: string,
+	): { taskId: string; reason: string; reasonCode: string } {
 		const flags = this.taskIdPattern.flags.includes("g") ? this.taskIdPattern.flags : `${this.taskIdPattern.flags}g`
 		const matches = new Set(
 			Array.from(branch.matchAll(new RegExp(this.taskIdPattern.source, flags)), (match) => match[0]),
@@ -140,9 +108,9 @@ export class TaskResolver {
 
 		if (matches.size > 1) {
 			const candidates = [...matches]
-			this.reject(scope, {
-				reason: "current Git branch contains more than one task ID",
+			this.reject(logger, branch, {
 				reasonCode: "ambiguous-task-id",
+				reason: "current Git branch contains more than one task ID",
 				message: `Multiple task IDs found in current Git branch: ${candidates.join(", ")}`,
 				attributes: { candidates },
 			})
@@ -151,9 +119,9 @@ export class TaskResolver {
 		const matchedTaskId = matches.values().next().value
 		if (matches.size === 1 && !matchedTaskId) {
 			// Defensive: a pattern that also matches the empty string yields no usable ID.
-			this.reject(scope, {
-				reason: "task ID matched but could not be read from the match set",
+			this.reject(logger, branch, {
 				reasonCode: "no-task-id",
+				reason: "task ID matched but could not be read from the match set",
 				message: UNRESOLVED_TASK_MESSAGE,
 			})
 		}
@@ -168,9 +136,9 @@ export class TaskResolver {
 
 		const fallbackTaskId = sanitizeBranchTaskId(branch)
 		if (!fallbackTaskId) {
-			this.reject(scope, {
-				reason: "current Git branch does not contain a task ID and its sanitized name is empty",
+			this.reject(logger, branch, {
 				reasonCode: "fallback-branch-name-empty",
+				reason: "current Git branch does not contain a task ID and its sanitized name is empty",
 				message: EMPTY_FALLBACK_MESSAGE,
 			})
 		}
@@ -184,38 +152,47 @@ export class TaskResolver {
 
 	/**
 	 * Guarantees `.roo/tasks/<taskId>` exists so downstream readers and writers
-	 * never hit ENOENT, and records the mutation.
+	 * never hit ENOENT.
 	 */
-	private async ensureTaskRoot(taskRoot: string, taskId: string, scope: ResolveScope): Promise<void> {
-		let createdPath: string | undefined
+	private async ensureTaskRoot(
+		logger: HarnessLoggerPort,
+		taskRoot: string,
+		taskId: string,
+		branch: string,
+	): Promise<void> {
 		try {
-			createdPath = await this.fileSystem.mkdir(taskRoot, { recursive: true })
+			await this.fileSystem.mkdir(taskRoot, { recursive: true })
 		} catch (error) {
-			this.reject(scope, {
-				reason: "task root directory could not be created",
+			this.reject(logger, branch, {
 				reasonCode: "task-root-create-failed",
+				reason: "task root directory could not be created",
 				message: `Unable to create task root directory ${taskRoot}: ${errorMessage(error)}`,
 				attributes: { taskId },
 			})
 		}
-
-		scope.logger.mutation("harness.task.resolve", {
-			target: taskRoot,
-			stateBefore: { existed: createdPath === undefined },
-			stateAfter: { exists: true },
-			reason: "task root directory ensured after resolving the task ID",
-			attributes: { reasonCode: "task-root-ensured", taskId },
-		})
 	}
 
 	/** Records a rejected decision and throws, so every rejection has the same shape. */
-	private reject(scope: ResolveScope, rejection: Rejection): never {
-		scope.logger.decision("harness.task.resolve", {
+	private reject(
+		logger: HarnessLoggerPort,
+		branch: string | null,
+		rejection: {
+			readonly reasonCode: string
+			readonly reason: string
+			readonly message: string
+			readonly attributes?: Readonly<Record<string, unknown>>
+		},
+	): never {
+		logger.decision("harness.task.resolve", {
 			level: "warn",
-			input: { ...scope.input, branch: scope.branch },
+			input: branch === null ? null : { branch },
 			result: null,
 			reason: rejection.reason,
-			attributes: { reasonCode: rejection.reasonCode, branch: scope.branch, ...rejection.attributes },
+			attributes: {
+				reasonCode: rejection.reasonCode,
+				...(branch === null ? {} : { branch }),
+				...rejection.attributes,
+			},
 		})
 		throw new TaskResolutionError(rejection.message)
 	}

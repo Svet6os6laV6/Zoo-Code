@@ -37,9 +37,6 @@ vi.mock("@roo-code/core", () => ({
 		statusChanges: [],
 		changed: false,
 	}),
-	StateReconciler: class {
-		reconcile = vi.fn()
-	},
 	harnessLogger: () => ({
 		context: {},
 		event: vi.fn(),

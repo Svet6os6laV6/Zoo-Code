@@ -89,22 +89,6 @@ describe("TaskResolver instrumentation", () => {
 		expect(record?.reason).toContain("extracted from the current Git branch")
 	})
 
-	it("records the task root mutation alongside the resolved decision", async () => {
-		const logger = new RecordingHarnessLogger()
-		const resolver = taskResolverFor("feature/SITESUP-1116-heartbeat", logger)
-
-		await resolver.resolve({ workspacePath: "/workspace" })
-
-		const mutation = logger.byName("harness.task.resolve").find((entry) => entry.kind === "mutation")
-		expect(mutation).toMatchObject({
-			kind: "mutation",
-			target: path.join("/workspace", ".roo", "tasks", "SITESUP-1116"),
-			attributes: { reasonCode: "task-root-ensured", taskId: "SITESUP-1116" },
-		})
-		expect(mutation?.stateBefore).toEqual({ existed: false })
-		expect(mutation?.stateAfter).toEqual({ exists: true })
-	})
-
 	it("records the fallback decision when the branch has no task ID pattern match", async () => {
 		const logger = new RecordingHarnessLogger()
 		const resolver = taskResolverFor("feature/webhook-mvp", logger)
@@ -291,7 +275,6 @@ describe("TaskScheduler instrumentation", () => {
 		expect(mutation?.stateBefore).toEqual({
 			status: "READY_FOR_IMPLEMENTATION",
 			currentTask: "NONE",
-			owner: null,
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
@@ -299,7 +282,6 @@ describe("TaskScheduler instrumentation", () => {
 		expect(mutation?.stateAfter).toEqual({
 			status: "IMPLEMENTATION",
 			currentTask: "implementation/T02-worker.md",
-			owner: null,
 			nextStep: "Implement T02 (implementation/T02-worker.md).",
 			failureKey: "NONE",
 			failureAttempts: "0",

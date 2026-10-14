@@ -245,14 +245,21 @@ Everything that can go wrong degrades to the legacy behaviour instead of failing
 | `BLOCKED` resumes only through the harness action         | `LifecycleController.resume` requires the Unblock Condition and returns the canonical `BLOCKED` → `READY_FOR_IMPLEMENTATION` edge            |
 | `PLAN_READY` is left only through the harness action      | `LifecycleController.approvePlan` returns the canonical `PLAN_READY` → `READY_FOR_IMPLEMENTATION` edge; no stage outcome leaves `PLAN_READY` |
 
-## Known limitation
+## `Next Step` ownership
 
-`Next Step` is owned by `TaskScheduler` when it assigns an implementation unit; the lifecycle writes
-only `Status` and `Current Task`, so after a stage move the remaining `Next Step` text can describe
-work that has already happened (for example `Implement T02 (...)` while the status is `DONE`). No
-production consumer reads the field today — it is a human-facing pointer in the README — so refreshing
-it belongs to a deliberate wording decision rather than to this model. If you do refresh it, do it in
-`ModeRunner` through the shared field writer and keep the wording status-derived.
+`Next Step` is a human-facing pointer in the README, not a routing input. Two writers keep it current,
+both through the shared field writer:
+
+- `TaskScheduler` writes `Implement Txx (...)` when it assigns an implementation unit.
+- `ModeRunner` refreshes it in the same canonical write as `Status` on every transition it owns: a
+  `stop` writes a status-derived pointer (`PLAN_READY` → approve the plan, `QA_READY` → confirm the QA
+  outcome, `BLOCKED` → resolve the blocker, `DONE` → the lifecycle is complete), and a `start_mode`
+  writes `Run the <mode> stage.`
+
+The runner passes `undefined` for the decisions that continue the DAG (`schedule_implementation`,
+`reschedule_implementation`, `resume_implementation`), so the scheduler's assignment pointer is never
+overwritten. The wording is deterministic and status-derived, and the existing diff logic keeps an
+idempotent re-write byte-identical.
 
 ## Extending the model
 

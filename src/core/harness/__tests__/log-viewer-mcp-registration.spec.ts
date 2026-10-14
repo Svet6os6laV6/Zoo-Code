@@ -4,8 +4,8 @@ import * as path from "path"
 
 import {
 	createHarnessLogsMcpServerEntry,
+	McpSettingsParseError,
 	registerHarnessLogsMcpServer,
-	unregisterHarnessLogsMcpServer,
 } from "../log-viewer/mcp-registration"
 import { HARNESS_LOGS_MCP_SERVER_NAME } from "../log-viewer/mcp-server"
 
@@ -193,86 +193,44 @@ describe("registerHarnessLogsMcpServer", () => {
 		})
 	})
 
-	it("treats a broken JSON file as empty instead of failing", async () => {
+	it("rejects a malformed JSON file and leaves it byte-for-byte untouched", async () => {
 		const { settingsPath } = await setup("{ not json")
+		const before = await readRaw(settingsPath)
 
-		expect(await register({ settingsPath })).toBe(true)
+		await expect(register({ settingsPath })).rejects.toBeInstanceOf(McpSettingsParseError)
 
-		expect(await readSettings(settingsPath)).toEqual({
-			mcpServers: {
-				[HARNESS_LOGS_MCP_SERVER_NAME]: {
-					type: "stdio",
-					command: "node",
-					args: [SCRIPT_PATH, LOGS_DIRECTORY],
-				},
-			},
-		})
+		expect(await readRaw(settingsPath)).toBe(before)
 	})
 
-	it("treats a non-object document (and a non-object mcpServers) as empty", async () => {
+	it("rejects a non-object document and leaves it byte-for-byte untouched", async () => {
 		const { settingsPath } = await setup(JSON.stringify(["not", "an", "object"]))
+		const before = await readRaw(settingsPath)
+
+		await expect(register({ settingsPath })).rejects.toBeInstanceOf(McpSettingsParseError)
+
+		expect(await readRaw(settingsPath)).toBe(before)
+	})
+
+	it("names the file in the parse error so the user can fix it", async () => {
+		const { settingsPath } = await setup("null")
+
+		await expect(register({ settingsPath })).rejects.toThrow(settingsPath)
+	})
+
+	// Boundary of the parse-error protection: only the document itself must be an
+	// object. A non-object `mcpServers` value holds no servers to lose, so it is
+	// replaced with a valid object rather than failing registration.
+	it("replaces a non-object mcpServers value with a valid object", async () => {
+		const { settingsPath } = await setup(JSON.stringify({ mcpServers: "not-an-object" }))
 
 		expect(await register({ settingsPath })).toBe(true)
-		expect(Object.keys((await readSettings(settingsPath)).mcpServers ?? {})).toEqual([HARNESS_LOGS_MCP_SERVER_NAME])
 
-		const second = await setup(JSON.stringify({ mcpServers: "not-an-object" }))
-
-		expect(await register({ settingsPath: second.settingsPath })).toBe(true)
-		expect((await readSettings(second.settingsPath)).mcpServers).toEqual({
+		expect((await readSettings(settingsPath)).mcpServers).toEqual({
 			[HARNESS_LOGS_MCP_SERVER_NAME]: {
 				type: "stdio",
 				command: "node",
 				args: [SCRIPT_PATH, LOGS_DIRECTORY],
 			},
 		})
-	})
-})
-
-describe("unregisterHarnessLogsMcpServer", () => {
-	it("removes only the harness-logs entry and keeps the others", async () => {
-		const { settingsPath } = await setup(
-			JSON.stringify({
-				mcpServers: {
-					alpha: { type: "stdio", command: "alpha-bin" },
-					[HARNESS_LOGS_MCP_SERVER_NAME]: {
-						type: "stdio",
-						command: "node",
-						args: [SCRIPT_PATH, LOGS_DIRECTORY],
-					},
-					beta: { type: "streamable-http", url: "http://localhost:1234" },
-				},
-				unrelatedKey: "keep",
-			}),
-		)
-
-		expect(await unregisterHarnessLogsMcpServer({ settingsPath })).toBe(true)
-
-		const settings = await readSettings(settingsPath)
-
-		expect(settings.mcpServers).toEqual({
-			alpha: { type: "stdio", command: "alpha-bin" },
-			beta: { type: "streamable-http", url: "http://localhost:1234" },
-		})
-		expect(settings["unrelatedKey"]).toBe("keep")
-	})
-
-	it("is a no-op when the entry or the file is absent", async () => {
-		const { settingsPath } = await setup()
-		const raw = async () => readRaw(settingsPath).catch(() => undefined)
-
-		expect(await unregisterHarnessLogsMcpServer({ settingsPath })).toBe(false)
-
-		const withOthers = await setup(JSON.stringify({ mcpServers: { alpha: { type: "stdio", command: "a" } } }))
-		const before = await readRaw(withOthers.settingsPath)
-
-		expect(await unregisterHarnessLogsMcpServer({ settingsPath: withOthers.settingsPath })).toBe(false)
-		expect(await readRaw(withOthers.settingsPath)).toBe(before)
-		expect(await raw()).toBeUndefined()
-	})
-
-	it("tolerates a broken JSON file", async () => {
-		const { settingsPath } = await setup("{ not json")
-
-		expect(await unregisterHarnessLogsMcpServer({ settingsPath })).toBe(false)
 	})
 })
