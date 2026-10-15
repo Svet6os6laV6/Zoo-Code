@@ -11,7 +11,10 @@ import { DeleteTaskDialog } from "../history/DeleteTaskDialog"
 import {
 	CopyIcon,
 	CheckIcon,
+	ClipboardCheckIcon,
+	BadgeCheckIcon,
 	DownloadIcon,
+	FastForwardIcon,
 	Trash2Icon,
 	FileJsonIcon,
 	MessageSquareCodeIcon,
@@ -36,6 +39,24 @@ export const TaskActions = ({ item, buttonsDisabled }: TaskActionsProps) => {
 				icon={PlayIcon}
 				title={t("chat:task.resumeBlockedTask")}
 				onClick={() => vscode.postMessage({ type: "resumeBlockedTask" })}
+			/>
+
+			<LucideIconButton
+				icon={ClipboardCheckIcon}
+				title={t("chat:task.approvePlan")}
+				onClick={() => vscode.postMessage({ type: "approvePlan" })}
+			/>
+
+			<LucideIconButton
+				icon={BadgeCheckIcon}
+				title={t("chat:task.approveQa")}
+				onClick={() => vscode.postMessage({ type: "approveQa" })}
+			/>
+
+			<LucideIconButton
+				icon={FastForwardIcon}
+				title={t("chat:task.approveStage")}
+				onClick={() => vscode.postMessage({ type: "approveStage" })}
 			/>
 
 			<LucideIconButton

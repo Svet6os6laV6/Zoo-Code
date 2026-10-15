@@ -1666,6 +1666,12 @@ export const webviewMessageHandler = async (
 			// the provider shows the confirmation before writing DONE.
 			await provider.approveQaTask()
 			break
+		case "approveStage":
+			// Harness-owned forced advance of a stage that kept restarting without
+			// reporting its outcome; the provider shows the confirmation before
+			// applying the stage's success outcome.
+			await provider.approveStageTask()
+			break
 		case "continueTaskLifecycle":
 			// Harness-owned "continue lifecycle": the provider asks the resolver
 			// whether the canonical state already allows the next stage, so a chain

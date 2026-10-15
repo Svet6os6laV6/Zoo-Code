@@ -233,6 +233,32 @@ state-only continue and then the legacy resume. A reply that _contains_ the mark
 parse (duplicated markers, an unknown result) is treated as ambiguity, not absence — asking again
 would not cure it, so the re-ask does not fire.
 
+### The restart budget and the forced advance
+
+The bounded re-ask covers one lost report, but the fallback continue can itself recreate the loop it
+is recovering from: when the canonical state is a stage entry (`STAGE_ENTRY_MODES` —
+`READY_FOR_REFACTOR`, `READY_FOR_REVIEW`, `REVIEW_PASSED`), the state-only continue delegates a
+fresh child of the same stage, and a model that never writes the marker would restart it forever.
+So `ClineProvider.reopenParentFromDelegation` counts consecutive marker-less completions per chain
+owner and, once `MAX_MARKER_LESS_STAGE_RESTARTS` is spent, stops delegating and hands the decision to
+the user:
+
+- the stuck loop is logged (`harness.stage.restart` per restart, `harness.stage.stuck` once paused,
+  with the artifact validation verdict);
+- a notification offers the harness-owned forced advance (`zoo-code.approveStage` command,
+  `approveStage` webview message, or the notification's "Force Advance Stage" button).
+
+The forced advance (`HarnessModeRunner.approveStage`) is the user-confirmed completion of the stuck
+stage: it derives the stage from the canonical state (`STAGE_ENTRY_MODES`, never from the child that
+happened to complete), reports the stage's success result (`STAGE_SUCCESS_RESULTS`) through the
+ordinary `LifecycleController.transition`, and so is bounded by the same preconditions and canonical
+edges as a stage-reported outcome — including the modal confirmation, which surfaces the artifact
+validation verdict so the user can review the artifacts before confirming. `ANALYSIS` is
+deliberately not force-advanceable: its state-only continue routes to the plan gate instead of
+restarting sublimation, so it cannot loop. The budget resets whenever a stage reports a usable
+outcome, the user force-advances, or the paused chain is retried through the "continue lifecycle"
+command.
+
 ## The stage instruction
 
 The message that starts a stage is a pointer, not a payload. `buildStageInstruction` composes it from
@@ -285,39 +311,44 @@ violate it.
 
 Everything that can go wrong degrades to the legacy behaviour instead of failing the task:
 
-| Failure                                                    | Result                                                                                                                               |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Not a lifecycle mode, or no unambiguous report             | One bounded re-ask child (`buildStageReaskInstruction`); a second marker-less reply returns `null` and the parent resumes as before. |
-| Mode/status mismatch, or a non-canonical status transition | `invalid`; the parent resumes as before.                                                                                             |
-| Selected mode is not configured                            | `startMode` throws `LifecycleError`; the parent resumes as before.                                                                   |
-| README has no canonical `Status` line                      | `LifecycleError`; the parent resumes as before.                                                                                      |
-| Scheduler cannot produce a next stage                      | `invalid`; the parent resumes as before.                                                                                             |
-| Approval with no ready unit (DAG broken by an edit)        | task stays at `READY_FOR_IMPLEMENTATION` + `Current Task: NONE`; retry via the "continue lifecycle" command.                         |
+| Failure                                                    | Result                                                                                                                                               |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Not a lifecycle mode, or no unambiguous report             | One bounded re-ask child (`buildStageReaskInstruction`); a second marker-less reply returns `null` and the parent resumes as before.                 |
+| Stage keeps completing without the marker (restart loop)   | `MAX_MARKER_LESS_STAGE_RESTARTS` consecutive restarts pause the chain: `harness.stage.stuck` is logged, the user is offered `zoo-code.approveStage`. |
+| Forced advance against a non-entry state                   | `HarnessModeRunner.approveStage` returns `null`; the task is unchanged.                                                                              |
+| Mode/status mismatch, or a non-canonical status transition | `invalid`; the parent resumes as before.                                                                                                             |
+| Selected mode is not configured                            | `startMode` throws `LifecycleError`; the parent resumes as before.                                                                                   |
+| README has no canonical `Status` line                      | `LifecycleError`; the parent resumes as before.                                                                                                      |
+| Scheduler cannot produce a next stage                      | `invalid`; the parent resumes as before.                                                                                                             |
+| Approval with no ready unit (DAG broken by an edit)        | task stays at `READY_FOR_IMPLEMENTATION` + `Current Task: NONE`; retry via the "continue lifecycle" command.                                         |
 
 | Attempt budget exhausted (`max-attempts` / `max-total-attempts`) | `stop` at `BLOCKED`; the parent resumes as before. |
 
 ## Where the invariants are enforced
 
-| Invariant                                                                        | Enforced by                                                                                                                                                                    |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| No status is written outside `TASK_STATUS_TRANSITIONS`                           | `LifecycleController.transition`                                                                                                                                               |
-| A mode only completes a status its stage owns                                    | `MODE_STATUSES` precondition check                                                                                                                                             |
-| Every status a mode claims can actually be routed                                | controller spec, `claims only stage/status pairs that can actually be routed`                                                                                                  |
-| Every decision the cross-product can produce is canonical                        | controller spec, `only ever writes canonical task status transitions`                                                                                                          |
-| The instruction and the parser agree on the marker                               | `packages/core/src/lifecycle/__tests__/mode-runner.spec.ts`, `asks the stage for the outcome marker the parser reads back`                                                     |
-| Only one writer mutates the README block                                         | `CanonicalReadmeWriter` is the sole read-modify-write path for `ModeRunner`; `TaskScheduler` uses the same field writer and atomic write                                       |
-| The canonical README is read-only for model tools outside `ANALYSIS`             | `evaluateArtifactMutationGate` (`src/core/harness/lifecycle-gate.ts`) rejects the artifacts-root README in every non-`ANALYSIS` status                                         |
-| A schedulable cause never stops the lifecycle                                    | `LifecycleController.decide` routes `code` + `IMPLEMENTATION` + `RESCHEDULE_REQUIRED` to `reschedule_implementation`; only `BLOCKED` stops                                     |
-| A parked unit returns to the DAG                                                 | `parkImplementationTask` rewrites `IN_PROGRESS` → `TODO`; `readyTasks` re-includes it once its dependency is `DONE`                                                            |
-| A reschedule cannot loop on the same unit                                        | `ModeRunner` refuses a reschedule that left the parked unit ready                                                                                                              |
-| `BLOCKED` resumes only through the harness action                                | `LifecycleController.resume` requires the Unblock Condition and returns the canonical `BLOCKED` → origin edge                                                                  |
-| A resume returns to the origin stage, not the pipeline start                     | controller spec, `resumes a task blocked at its ... stage entry back into that stage`; the origin is recorded as `Blocked From` on the stop                                    |
-| The marker re-ask is bounded to one attempt                                      | `requestStageOutcomeReask` refuses when the completed child's task record starts with `STAGE_RE_ASK_PREFIX`                                                                    |
-| The episode budget holds against key churn                                       | `startFixPass` advances `Total Failure Attempts` on every key; controller spec, `stops at BLOCKED once the episode budget is exhausted across keys`                            |
-| `PLAN_READY` is left only through the harness action                             | `LifecycleController.approvePlan` returns the canonical `PLAN_READY` → `READY_FOR_IMPLEMENTATION` edge; no stage outcome leaves `PLAN_READY`                                   |
-| `QA_READY` is finished only through the harness action or a passing `qa` outcome | `LifecycleController.approveQa` returns the canonical `QA_READY` → `DONE` edge; the stop notification points the user at `zoo-code.approveQa`                                  |
-| `DONE` is absorbing and every reachable state can still reach it                 | `scripts/check-harness-stage-lifecycle.ts` (via `pnpm lifecycle:model-check`) explores every stage-outcome/action interleaving                                                 |
-| The queue opening on a drained DAG enters Refactor canonically                   | `READY_FOR_IMPLEMENTATION` → `READY_FOR_REFACTOR` edge in `TASK_STATUS_TRANSITIONS`; `scripts/check-harness-stage-lifecycle.ts` proves the scheduler continuation is canonical |
+| Invariant                                                                        | Enforced by                                                                                                                                                                                   |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No status is written outside `TASK_STATUS_TRANSITIONS`                           | `LifecycleController.transition`                                                                                                                                                              |
+| A mode only completes a status its stage owns                                    | `MODE_STATUSES` precondition check                                                                                                                                                            |
+| Every status a mode claims can actually be routed                                | controller spec, `claims only stage/status pairs that can actually be routed`                                                                                                                 |
+| Every decision the cross-product can produce is canonical                        | controller spec, `only ever writes canonical task status transitions`                                                                                                                         |
+| The instruction and the parser agree on the marker                               | `packages/core/src/lifecycle/__tests__/mode-runner.spec.ts`, `asks the stage for the outcome marker the parser reads back`                                                                    |
+| Only one writer mutates the README block                                         | `CanonicalReadmeWriter` is the sole read-modify-write path for `ModeRunner`; `TaskScheduler` uses the same field writer and atomic write                                                      |
+| The canonical README is read-only for model tools outside `ANALYSIS`             | `evaluateArtifactMutationGate` (`src/core/harness/lifecycle-gate.ts`) rejects the artifacts-root README in every non-`ANALYSIS` status                                                        |
+| A schedulable cause never stops the lifecycle                                    | `LifecycleController.decide` routes `code` + `IMPLEMENTATION` + `RESCHEDULE_REQUIRED` to `reschedule_implementation`; only `BLOCKED` stops                                                    |
+| A parked unit returns to the DAG                                                 | `parkImplementationTask` rewrites `IN_PROGRESS` → `TODO`; `readyTasks` re-includes it once its dependency is `DONE`                                                                           |
+| A reschedule cannot loop on the same unit                                        | `ModeRunner` refuses a reschedule that left the parked unit ready                                                                                                                             |
+| `BLOCKED` resumes only through the harness action                                | `LifecycleController.resume` requires the Unblock Condition and returns the canonical `BLOCKED` → origin edge                                                                                 |
+| A resume returns to the origin stage, not the pipeline start                     | controller spec, `resumes a task blocked at its ... stage entry back into that stage`; the origin is recorded as `Blocked From` on the stop                                                   |
+| The marker re-ask is bounded to one attempt                                      | `requestStageOutcomeReask` refuses when the completed child's task record starts with `STAGE_RE_ASK_PREFIX`                                                                                   |
+| The marker-less restart loop is bounded                                          | `ClineProvider.shouldPauseStageRestart` counts per chain owner and stops at `MAX_MARKER_LESS_STAGE_RESTARTS`; spec: `pauses the auto-restart loop once the marker-less stage budget is spent` |
+| The stage-entry table matches the state-only continue                            | controller spec, `restarts the %s stage exactly as STAGE_ENTRY_MODES declares`                                                                                                                |
+| A forced advance routes through the ordinary transition                          | `HarnessModeRunner.approveStage` reports `STAGE_SUCCESS_RESULTS[mode]` via `LifecycleController.transition`; controller spec, `force-advances %s canonically through its success result %s`   |
+| The episode budget holds against key churn                                       | `startFixPass` advances `Total Failure Attempts` on every key; controller spec, `stops at BLOCKED once the episode budget is exhausted across keys`                                           |
+| `PLAN_READY` is left only through the harness action                             | `LifecycleController.approvePlan` returns the canonical `PLAN_READY` → `READY_FOR_IMPLEMENTATION` edge; no stage outcome leaves `PLAN_READY`                                                  |
+| `QA_READY` is finished only through the harness action or a passing `qa` outcome | `LifecycleController.approveQa` returns the canonical `QA_READY` → `DONE` edge; the stop notification points the user at `zoo-code.approveQa`                                                 |
+| `DONE` is absorbing and every reachable state can still reach it                 | `scripts/check-harness-stage-lifecycle.ts` (via `pnpm lifecycle:model-check`) explores every stage-outcome/action interleaving                                                                |
+| The queue opening on a drained DAG enters Refactor canonically                   | `READY_FOR_IMPLEMENTATION` → `READY_FOR_REFACTOR` edge in `TASK_STATUS_TRANSITIONS`; `scripts/check-harness-stage-lifecycle.ts` proves the scheduler continuation is canonical                |
 
 ## `Next Step` ownership
 

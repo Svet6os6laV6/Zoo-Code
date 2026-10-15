@@ -2,8 +2,12 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import * as vscode from "vscode"
+import * as fs from "fs"
+import * as os from "os"
+import * as path from "path"
 import { providerIdentifiers, RooCodeEventName } from "@roo-code/types"
 import type { ClineMessage, HistoryItem } from "@roo-code/types"
+import { MAX_MARKER_LESS_STAGE_RESTARTS } from "@roo-code/core"
 
 import type { ApiMessage } from "../core/task-persistence"
 import type { Task } from "../core/task/Task"
@@ -13,6 +17,8 @@ vi.mock("vscode", () => {
 	const window = {
 		createTextEditorDecorationType: vi.fn(() => ({ dispose: vi.fn() })),
 		showErrorMessage: vi.fn(),
+		showWarningMessage: vi.fn(),
+		showInformationMessage: vi.fn(),
 		onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
 	}
 	const workspace = {
@@ -242,6 +248,122 @@ describe("History resume delegation - parent metadata transitions", () => {
 		expect(continueHarnessLifecycle).toHaveBeenCalledWith(parentInstance, { requirePlanApproval: true })
 		expect(schedule).not.toHaveBeenCalled()
 		expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
+	})
+
+	it("pauses the auto-restart loop once the marker-less stage budget is spent", async () => {
+		const { promises: fsp } = fs
+		const taskRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "stuck-stage-"))
+		await fsp.writeFile(
+			path.join(taskRoot, "README.md"),
+			"Protocol Version: 2\nTask: SITESUP-1116\nStatus: READY_FOR_REFACTOR\nCurrent Task: NONE\n",
+		)
+
+		try {
+			const parentItem = {
+				id: "parent-stuck",
+				status: "delegated",
+				awaitingChildId: "child-stuck",
+				childIds: ["child-stuck"],
+				ts: 100,
+				task: "Parent stuck task",
+				tokensIn: 0,
+				tokensOut: 0,
+				totalCost: 0,
+			}
+			const childItem = { id: "child-stuck", status: "active", mode: "refactor" }
+			// A multi-call store: every completion must see the pair in its
+			// original delegated state, so the updaters get fresh copies instead
+			// of the mutated map entries.
+			const taskHistoryStore = {
+				atomicUpdatePair: vi.fn(
+					async (
+						_childId: string,
+						_parentId: string,
+						childUpdater: (h: HistoryItem) => HistoryItem,
+						parentUpdater: (h: HistoryItem) => HistoryItem,
+					) => {
+						childUpdater({ ...childItem } as HistoryItem)
+						parentUpdater({ ...parentItem } as HistoryItem)
+						return []
+					},
+				),
+				get: vi.fn((id: string) =>
+					id === childItem.id ? childItem : id === parentItem.id ? parentItem : undefined,
+				),
+				invalidate: vi.fn().mockResolvedValue(undefined),
+			}
+			const parentInstance = {
+				taskId: parentItem.id,
+				getTaskContext: vi.fn().mockResolvedValue({
+					taskId: "SITESUP-1116",
+					branch: "fix-23",
+					taskRoot,
+				}),
+				getHarnessLogContext: vi.fn().mockResolvedValue({
+					traceId: "trace-stuck",
+					taskId: "SITESUP-1116",
+					agentTaskId: parentItem.id,
+					txxId: null,
+					mode: "refactor",
+				}),
+				resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+				overwriteClineMessages: vi.fn().mockResolvedValue(undefined),
+				overwriteApiConversationHistory: vi.fn().mockResolvedValue(undefined),
+			}
+			let currentTask: object | undefined = { taskId: childItem.id }
+			const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
+			const provider = makeProviderStub({
+				// Bypass the re-ask layer: this test exercises the restart budget,
+				// not the marker re-ask child.
+				requestStageOutcomeReask: vi.fn().mockResolvedValue(false),
+				contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+				getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
+				getCurrentTask: vi.fn(() => currentTask),
+				removeClineFromStack: vi.fn(async () => {
+					currentTask = undefined
+				}),
+				createTaskWithHistoryItem: vi.fn(async () => (currentTask = parentInstance)),
+				emit: vi.fn(),
+				taskHistoryStore,
+				taskScheduler: { schedule },
+			})
+
+			const request = {
+				parentTaskId: parentItem.id,
+				childTaskId: childItem.id,
+				completionResultSummary: "Refactor work done, no stage marker",
+			}
+
+			// Every completion lacks the outcome marker, and the canonical state
+			// keeps routing to the same stage, so each continue delegates a fresh
+			// refactor child — until the budget is spent.
+			runHarnessLifecycle.mockResolvedValue(null)
+			continueHarnessLifecycle.mockResolvedValue({
+				type: "started",
+				mode: "refactor",
+				status: "READY_FOR_REFACTOR",
+			})
+
+			const restartsBeforePause = MAX_MARKER_LESS_STAGE_RESTARTS - 1
+
+			for (let restart = 0; restart < restartsBeforePause; restart += 1) {
+				expect(await ClineProvider.prototype.reopenParentFromDelegation.call(provider, request)).toBe(true)
+			}
+			expect(continueHarnessLifecycle).toHaveBeenCalledTimes(restartsBeforePause)
+
+			// The restart that spends the budget pauses the chain for a user
+			// decision instead of delegating another stage child.
+			expect(await ClineProvider.prototype.reopenParentFromDelegation.call(provider, request)).toBe(true)
+			expect(continueHarnessLifecycle).toHaveBeenCalledTimes(restartsBeforePause)
+			expect(schedule).not.toHaveBeenCalled()
+			expect(parentInstance.resumeAfterDelegation).not.toHaveBeenCalled()
+
+			const warning = (vscode.window.showWarningMessage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string
+			expect(warning).toContain(`the refactor stage restarted ${MAX_MARKER_LESS_STAGE_RESTARTS} times`)
+			expect(warning).toContain("automatic restarts are paused")
+		} finally {
+			await fs.promises.rm(taskRoot, { recursive: true, force: true })
+		}
 	})
 
 	it("continues the chain for a cancelled stage-child that was resumed and finished without a stage marker", async () => {

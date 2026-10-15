@@ -64,6 +64,34 @@ export const STAGE_RESULT_MARKER = "Stage Result:"
  */
 export const STAGE_FAILURE_KEY_MARKER = "Failure Key:"
 
+/**
+ * The stage result that reports the stage's work is finished, per mode.
+ *
+ * The user-facing forced advance (`HarnessModeRunner.approveStage`) confirms a
+ * stuck stage's work on the user's behalf and reports exactly this outcome, so
+ * the confirmation reuses the ordinary `transition` routing — preconditions and
+ * canonical edges included — instead of a second decision table.
+ */
+export const STAGE_SUCCESS_RESULTS = {
+	sublimation: "COMPLETED",
+	code: "COMPLETED",
+	refactor: "COMPLETED",
+	reviewer: "PASSED",
+	qa: "PASSED",
+} as const satisfies Record<LifecycleMode, StageResult>
+
+/**
+ * Maximum consecutive restarts of the same stage after a delegated child
+ * completed without a usable outcome marker.
+ *
+ * Deliberately a code constant like `MAX_FAILURE_ATTEMPTS`: the bound must hold
+ * even when the model keeps finishing without the marker line. The integration
+ * layer counts the restarts and, once the budget is spent, stops the
+ * auto-restart loop and hands the decision to the user instead of delegating
+ * another stage child.
+ */
+export const MAX_MARKER_LESS_STAGE_RESTARTS = 3
+
 const lifecycleModeSchema = z.enum(LIFECYCLE_MODES)
 const stageResultSchema = z.enum(STAGE_RESULTS)
 

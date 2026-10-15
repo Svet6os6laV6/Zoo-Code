@@ -505,6 +505,7 @@ export interface WebviewMessage {
 		| "continueTaskLifecycle"
 		| "approvePlan"
 		| "approveQa"
+		| "approveStage"
 		| "cancelAutoApproval"
 		| "updateVSCodeSetting"
 		| "getVSCodeSetting"

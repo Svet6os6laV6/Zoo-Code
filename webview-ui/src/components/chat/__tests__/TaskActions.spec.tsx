@@ -32,6 +32,9 @@ vi.mock("react-i18next", () => ({
 			const translations: Record<string, string> = {
 				"chat:task.export": "Export task history",
 				"chat:task.resumeBlockedTask": "Resume blocked task",
+				"chat:task.approvePlan": "Approve plan",
+				"chat:task.approveQa": "Confirm QA",
+				"chat:task.approveStage": "Force-advance stuck stage",
 				"chat:task.delete": "Delete Task (Shift + Click to skip confirmation)",
 				"chat:task.openApiHistory": "Open API History",
 				"chat:task.openUiHistory": "Open UI History",
@@ -114,6 +117,18 @@ describe("TaskActions", () => {
 		expect(mockPostMessage).toHaveBeenCalledWith({
 			type: "resumeBlockedTask",
 		})
+	})
+
+	it.each([
+		["Approve plan", "approvePlan"],
+		["Confirm QA", "approveQa"],
+		["Force-advance stuck stage", "approveStage"],
+	] as const)("sends the %s gate message when its button is clicked", (label, type) => {
+		render(<TaskActions item={mockItem} buttonsDisabled={false} />)
+
+		fireEvent.click(screen.getByLabelText(label))
+
+		expect(mockPostMessage).toHaveBeenCalledWith({ type })
 	})
 
 	it("renders delete button when item has size", () => {

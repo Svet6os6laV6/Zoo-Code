@@ -33,6 +33,25 @@ export const MODE_STATUSES = {
 } as const satisfies Record<LifecycleMode, readonly TaskStatus[]>
 
 /**
+ * The stage-entry statuses: the canonical states whose state-only `continue`
+ * decision starts exactly this stage's mode — the restart point of a stage that
+ * keeps completing without its outcome marker.
+ *
+ * `ClineProvider` reads this table to detect such a loop, and
+ * `HarnessModeRunner.approveStage` to map a stuck status back to its stage.
+ * Drift is guarded by the controller spec: the `resolve` decision for every
+ * entry status is a `start_mode` of exactly this mode. Deliberately partial —
+ * `ANALYSIS` advances to the plan gate instead of restarting sublimation, the
+ * unit-scheduler states route through `TaskScheduler`, and the fix-pass markers
+ * and gates are owned by other harness actions.
+ */
+export const STAGE_ENTRY_MODES: Readonly<Partial<Record<TaskStatus, LifecycleMode>>> = {
+	READY_FOR_REFACTOR: "refactor",
+	READY_FOR_REVIEW: "reviewer",
+	REVIEW_PASSED: "qa",
+}
+
+/**
  * Maximum number of fix passes the harness starts for a single failure key before
  * it stops the loop and hands the task back to the user as `BLOCKED`.
  *

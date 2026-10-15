@@ -10,7 +10,9 @@ import {
 	MAX_FAILURE_ATTEMPTS,
 	MAX_TOTAL_FAILURE_ATTEMPTS,
 	MODE_STATUSES,
+	STAGE_ENTRY_MODES,
 	STAGE_RESULTS,
+	STAGE_SUCCESS_RESULTS,
 	parseStageOutcome,
 } from "../index.js"
 
@@ -541,6 +543,35 @@ describe("LifecycleController.resolve", () => {
 
 		expect(decision).toEqual({ type: "start_mode", status, mode })
 	})
+
+	// Drift guard for `STAGE_ENTRY_MODES`: every entry must be exactly the set of
+	// statuses whose state-only continue restarts that stage, so the restart
+	// budget and the forced advance cannot route a status the controller does
+	// not re-start.
+	it.each(Object.entries(STAGE_ENTRY_MODES) as [TaskState["status"], keyof typeof STAGE_SUCCESS_RESULTS][])(
+		"restarts the %s stage exactly as STAGE_ENTRY_MODES declares",
+		(status, mode) => {
+			const decision = controller.resolve({
+				state: state(status),
+				artifacts: artifacts(2),
+				report: validationReport(),
+			})
+
+			expect(decision).toEqual({ type: "start_mode", status, mode })
+		},
+	)
+
+	// Drift guard for `STAGE_SUCCESS_RESULTS`: a forced advance reports the
+	// mode's success outcome through the ordinary transition, so the entry must
+	// stay a result the controller actually routes for the mode's own status.
+	it.each(Object.entries(STAGE_SUCCESS_RESULTS) as [keyof typeof MODE_STATUSES, (typeof STAGE_RESULTS)[number]][])(
+		"force-advances %s canonically through its success result %s",
+		(mode, result) => {
+			const decision = controller.transition(state(MODE_STATUSES[mode][0]), { mode, result, failureKey: null })
+
+			expect(decision.type).not.toBe("invalid")
+		},
+	)
 
 	it.each(["REFACTOR", "REVIEW", "QA_READY"] as const)(
 		"does not advance while a fix pass is in flight at %s",

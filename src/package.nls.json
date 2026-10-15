@@ -30,6 +30,7 @@
 	"command.continueTaskLifecycle.title": "Continue Task Lifecycle",
 	"command.approvePlan.title": "Approve Plan",
 	"command.approveQa.title": "Confirm QA",
+	"command.approveStage.title": "Force-Advance Stuck Stage",
 	"command.registerHarnessLogsMcp.title": "Register Harness Log MCP Server",
 	"configuration.title": "Zoo Code",
 	"commands.allowedCommands.description": "Commands that can be auto-executed when 'Always approve execute operations' is enabled",

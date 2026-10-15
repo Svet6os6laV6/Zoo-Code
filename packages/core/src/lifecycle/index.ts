@@ -3,13 +3,16 @@ export {
 	MAX_FAILURE_ATTEMPTS,
 	MAX_TOTAL_FAILURE_ATTEMPTS,
 	MODE_STATUSES,
+	STAGE_ENTRY_MODES,
 } from "./lifecycle-controller.js"
 export { ModeRunner } from "./mode-runner.js"
 export {
 	LIFECYCLE_MODES,
+	MAX_MARKER_LESS_STAGE_RESTARTS,
 	STAGE_FAILURE_KEY_MARKER,
 	STAGE_RESULTS,
 	STAGE_RESULT_MARKER,
+	STAGE_SUCCESS_RESULTS,
 	LifecycleError,
 	parseStageOutcome,
 	type FailureTracking,

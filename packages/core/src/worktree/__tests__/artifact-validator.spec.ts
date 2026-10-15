@@ -112,8 +112,10 @@ describe("ArtifactValidator", () => {
 		})
 	})
 
-	it("reports a missing README", async () => {
-		const report = await validatorFor({ [path.join(taskRoot, "README.md")]: null }).validate(taskContext)
+	it("reports a missing README as an error during implementation", async () => {
+		const report = await validatorFor({ [path.join(taskRoot, "README.md")]: null }).validate(taskContext, {
+			status: "IMPLEMENTATION",
+		})
 
 		expect(report.errors).toContainEqual({
 			severity: "error",
@@ -121,6 +123,25 @@ describe("ArtifactValidator", () => {
 			taskId: null,
 			message: "Missing README.md for task SITESUP-1116",
 		})
+	})
+
+	it("treats a missing README as a warning during analysis (new task)", async () => {
+		const report = await validatorFor({
+			[path.join(taskRoot, "README.md")]: null,
+			[path.join(taskRoot, "implementation-plan.md")]: null,
+			[path.join(taskRoot, "handoff.md")]: null,
+			[path.join(implementation, "T01-trigger.md")]: null,
+			[path.join(implementation, "T02-worker.md")]: null,
+		}).validate(taskContext, { status: "ANALYSIS" })
+
+		expect(report.valid).toBe(true)
+		expect(report.errors).toEqual([])
+		expect(report.warnings.map((item) => item.code)).toEqual([
+			"missing-readme",
+			"missing-implementation-plan",
+			"missing-handoff",
+			"missing-implementation-directory",
+		])
 	})
 
 	it("treats missing plan and handoff as warnings during analysis", async () => {

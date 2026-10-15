@@ -208,6 +208,106 @@ describe("HarnessModeRunner", () => {
 	})
 })
 
+describe("HarnessModeRunner.approveStage", () => {
+	it("reports the stuck stage's success outcome through the ordinary routing", async () => {
+		const stuck = { ...state, status: "READY_FOR_REFACTOR" as const }
+		const transition = vi.fn().mockReturnValue({
+			type: "start_mode",
+			status: "READY_FOR_REVIEW",
+			mode: "reviewer",
+		})
+		const run = vi.fn().mockResolvedValue({ type: "started", status: "READY_FOR_REVIEW", mode: "reviewer" })
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(stuck) },
+			controller: { transition, resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn(), approveQa: vi.fn() },
+			modeRunner: { run },
+		})
+
+		const result = await runner.approveStage(
+			{ getTaskContext: vi.fn().mockResolvedValue(context) },
+			{ requirePlanApproval: true },
+		)
+
+		expect(transition).toHaveBeenCalledWith(
+			stuck,
+			{ mode: "refactor", result: "COMPLETED", failureKey: null },
+			{ requirePlanApproval: true },
+		)
+		expect(result).toEqual({ type: "started", status: "READY_FOR_REVIEW", mode: "reviewer" })
+	})
+
+	it("leaves a task that is not at a stage entry unchanged", async () => {
+		const transition = vi.fn()
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue({ ...state, status: "REVIEW" as const }) },
+			controller: { transition, resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn(), approveQa: vi.fn() },
+			modeRunner: { run: vi.fn() },
+		})
+
+		const result = await runner.approveStage({ getTaskContext: vi.fn().mockResolvedValue(context) })
+
+		expect(result).toBeNull()
+		expect(transition).not.toHaveBeenCalled()
+	})
+
+	it("force-advances a stuck refactor stage through the real lifecycle", async () => {
+		const taskRoot = path.join("/workspace", ".roo", "tasks", "SITESUP-1116")
+		const readmePath = path.join(taskRoot, "README.md")
+		const files = new Map<string, string>([
+			[readmePath, "Protocol Version: 2\nTask: SITESUP-1116\nStatus: READY_FOR_REFACTOR\nCurrent Task: NONE\n"],
+		])
+		const fileSystem = {
+			readFile: async (filePath: string) => {
+				const content = files.get(filePath)
+				if (content === undefined) throw Object.assign(new Error(`ENOENT: ${filePath}`), { code: "ENOENT" })
+				return content
+			},
+			readdir: async (dirPath: string) => {
+				const prefix = `${dirPath}${path.sep}`
+				const entries = [...files.keys()]
+					.filter((filePath) => filePath.startsWith(prefix))
+					.map((filePath) => filePath.slice(prefix.length))
+				if (entries.length === 0) throw Object.assign(new Error(`ENOENT: ${dirPath}`), { code: "ENOENT" })
+				return entries
+			},
+			writeFile: async (filePath: string, data: string) => {
+				files.set(filePath, data)
+			},
+			rename: async (oldPath: string, newPath: string) => {
+				const content = files.get(oldPath)
+				if (content === undefined) throw Object.assign(new Error(`ENOENT: ${oldPath}`), { code: "ENOENT" })
+				files.delete(oldPath)
+				files.set(newPath, content)
+			},
+		}
+		const starts: Array<{ mode: string; message: string }> = []
+		const runner = new HarnessModeRunner(
+			async (mode, message) => {
+				starts.push({ mode, message })
+			},
+			{
+				stateResolver: new TaskStateResolver(fileSystem),
+				controller: new LifecycleController(),
+				modeRunner: new ModeRunner(
+					async (mode, message) => {
+						starts.push({ mode, message })
+					},
+					new TaskScheduler(fileSystem),
+					fileSystem,
+				),
+			},
+		)
+
+		const result = await runner.approveStage({
+			getTaskContext: vi.fn().mockResolvedValue({ ...context, taskRoot }),
+		})
+
+		expect(result).toEqual({ type: "started", mode: "reviewer", status: "READY_FOR_REVIEW" })
+		expect(starts.map((start) => start.mode)).toEqual(["reviewer"])
+		expect(files.get(readmePath)).toContain("Status: READY_FOR_REVIEW")
+	})
+})
+
 function artifacts(taskCount: number): ImplementationArtifacts {
 	return {
 		directory: path.join(context.taskRoot, "implementation"),

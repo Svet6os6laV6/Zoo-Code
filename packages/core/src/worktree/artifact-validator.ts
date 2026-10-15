@@ -148,7 +148,7 @@ export class ArtifactValidator {
 			{
 				fileName: "README.md",
 				code: "missing-readme",
-				severity: "error",
+				severity: missingSeverity,
 				message: `Missing README.md for task ${context.taskId}`,
 			},
 			{

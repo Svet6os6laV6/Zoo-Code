@@ -2,6 +2,8 @@ import {
 	ArtifactValidator,
 	LifecycleController,
 	ModeRunner,
+	STAGE_ENTRY_MODES,
+	STAGE_SUCCESS_RESULTS,
 	TaskStateResolver,
 	TxxParser,
 	harnessLogger,
@@ -11,6 +13,7 @@ import {
 	type LifecycleMode,
 	type LifecycleResult,
 	type ModeRunResult,
+	type StageOutcome,
 	type TaskContext,
 	type TaskState,
 } from "@roo-code/core"
@@ -129,6 +132,39 @@ export class HarnessModeRunner {
 		const state = await this.stateResolver.resolve(context)
 
 		return this.applyDecision(task, context, state, this.controller.approveQa(state))
+	}
+
+	/**
+	 * Force-advance a stage that keeps restarting without reporting its outcome
+	 * (harness-owned).
+	 *
+	 * The stuck-stage counterpart of `approveQa`: the integration layer stopped
+	 * the auto-restart loop after `MAX_MARKER_LESS_STAGE_RESTARTS` consecutive
+	 * marker-less completions, and the user has reviewed the stage artifacts and
+	 * confirmed they are complete. The confirmation acts as the stage's success
+	 * report — the outcome is the mode's `STAGE_SUCCESS_RESULTS` entry routed
+	 * through the ordinary `transition`, so preconditions and canonical edges
+	 * decide the next stage exactly as if the stage had reported it.
+	 *
+	 * The stage is derived from the canonical state (`STAGE_ENTRY_MODES`), never
+	 * from the mode of the child that happened to complete, so a stale call can
+	 * only ever be a no-op. Returns `null` when the state is not a stage-entry
+	 * status, so the caller leaves the task unchanged instead of writing state.
+	 */
+	async approveStage(
+		task: LifecycleTask,
+		options: { requirePlanApproval?: boolean } = {},
+	): Promise<ModeRunResult | null> {
+		const context = await task.getTaskContext()
+		const state = await this.stateResolver.resolve(context)
+		const mode = STAGE_ENTRY_MODES[state.status]
+		if (!mode) {
+			return null
+		}
+
+		const outcome: StageOutcome = { mode, result: STAGE_SUCCESS_RESULTS[mode], failureKey: null }
+
+		return this.applyDecision(task, context, state, this.controller.transition(state, outcome, options))
 	}
 
 	/**

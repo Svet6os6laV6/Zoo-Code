@@ -286,6 +286,19 @@ const getCommandsMap = ({
 			outputChannel.appendLine(`[approveQa] failed: ${error}`)
 		}
 	},
+	approveStage: async () => {
+		const visibleProvider = getVisibleProviderOrLog(outputChannel)
+
+		if (!visibleProvider) {
+			return
+		}
+
+		try {
+			await visibleProvider.approveStageTask()
+		} catch (error) {
+			outputChannel.appendLine(`[approveStage] failed: ${error}`)
+		}
+	},
 	openHarnessLogViewer: () => harness.openLogViewer(),
 	registerHarnessLogsMcp: () => harness.registerMcpServer(),
 })

@@ -70,10 +70,14 @@ import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTa
 import { TelemetryService } from "@roo-code/telemetry"
 import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
 import {
+	ArtifactValidator,
 	LIFECYCLE_MODES,
 	LifecycleError,
+	MAX_MARKER_LESS_STAGE_RESTARTS,
+	STAGE_ENTRY_MODES,
 	STAGE_RE_ASK_PREFIX,
 	STAGE_RESULT_MARKER,
+	STAGE_SUCCESS_RESULTS,
 	TaskStateResolver,
 	buildStageReaskInstruction,
 	harnessLogger,
@@ -272,6 +276,13 @@ export class ClineProvider
 	private taskScheduler = new TaskScheduler()
 	private static readonly delegationTransitionLocks = new Map<string, Promise<void>>()
 	private cancelledDelegationChildIds = new Set<string>()
+	/**
+	 * Consecutive marker-less restarts per chain owner, bounded by
+	 * `MAX_MARKER_LESS_STAGE_RESTARTS`. The count is per chain (not per stage
+	 * instance) and resets whenever a stage reports a usable outcome or the user
+	 * force-advances, so it bounds one stuck loop, not the whole task history.
+	 */
+	private stageRestartBudgets = new Map<string, { mode: string; count: number }>()
 	private codeIndexStatusSubscription?: vscode.Disposable
 	private codeIndexManager?: CodeIndexManager
 	private _workspaceTracker?: WorkspaceTracker // workSpaceTracker read-only for access outside this class
@@ -4278,6 +4289,155 @@ export class ClineProvider
 	}
 
 	/**
+	 * Count a marker-less stage restart and decide whether the loop must pause.
+	 *
+	 * A delegated stage child completed without a usable outcome marker and the
+	 * re-ask did not recover the report, so the state-only continue would
+	 * delegate another child of the same mode. The counter is per chain owner
+	 * and resets whenever a stage reports its outcome or the user
+	 * force-advances, so it bounds one stuck loop, not the whole task history.
+	 *
+	 * Returns `true` only when the restart must not be delegated: the budget
+	 * (`MAX_MARKER_LESS_STAGE_RESTARTS`) is spent, the stuck loop is logged as
+	 * `harness.stage.stuck`, and the user is offered the harness-owned forced
+	 * advance instead of another silent restart.
+	 */
+	private async shouldPauseStageRestart(
+		parentTaskId: string,
+		parentInstance: Task,
+		childHistory: HistoryItem,
+	): Promise<boolean> {
+		const mode = childHistory.mode
+		if (!mode || !isStageMode(mode)) {
+			return false
+		}
+
+		let state: TaskState
+		try {
+			state = await new TaskStateResolver().resolve(await parentInstance.getTaskContext())
+		} catch (error) {
+			this.log(
+				`[reopenParentFromDelegation] Could not resolve the state before counting a ${mode} stage restart: ${
+					error instanceof Error ? error.message : String(error)
+				}. Continuing without the restart budget.`,
+			)
+			return false
+		}
+
+		// The continue restarts a stage only when the canonical state routes to
+		// the same mode that just completed; a different decision (the scheduler,
+		// another stage, a gate) is progress, not a restart.
+		if (STAGE_ENTRY_MODES[state.status] !== mode) {
+			return false
+		}
+
+		const previous = this.stageRestartBudgets.get(parentTaskId)
+		const count = previous && previous.mode === mode ? previous.count + 1 : 1
+		this.stageRestartBudgets.set(parentTaskId, { mode, count })
+
+		if (count < MAX_MARKER_LESS_STAGE_RESTARTS) {
+			try {
+				harnessLogger().event("harness.stage.restart", {
+					level: "warn",
+					context: await this.safeHarnessLogContext(parentInstance),
+					attributes: {
+						mode,
+						restartCount: count,
+						budget: MAX_MARKER_LESS_STAGE_RESTARTS,
+						childTaskId: childHistory.id,
+					},
+				})
+			} catch {
+				// Diagnostics must never gate the routing decision.
+			}
+			return false
+		}
+
+		// Budget spent: the loop is stuck, not slow. Free the counter so a later
+		// manual retry (the "continue lifecycle" command) gets a fresh budget.
+		this.stageRestartBudgets.delete(parentTaskId)
+
+		try {
+			const context = await parentInstance.getTaskContext()
+			const report = await new ArtifactValidator().validate(context, { status: state.status })
+
+			harnessLogger().decision("harness.stage.stuck", {
+				level: "warn",
+				input: { taskId: state.taskId, status: state.status, mode, restartCount: count },
+				result: {
+					paused: true,
+					artifactsValid: report.valid,
+					artifactErrors: report.errors.length,
+					artifactWarnings: report.warnings.length,
+				},
+				reason: `${count} consecutive ${mode} stage restarts completed without a usable outcome marker; the auto-restart loop is paused for a user decision`,
+				attributes: { reasonCode: "stage-restart-budget-exhausted", budget: MAX_MARKER_LESS_STAGE_RESTARTS },
+				context: await this.safeHarnessLogContext(parentInstance),
+			})
+
+			this.log(
+				`[reopenParentFromDelegation] The ${mode} stage of task ${state.taskId} restarted ${count} times ` +
+					`without reporting its outcome; pausing the chain for a user decision.`,
+			)
+
+			// Fire-and-forget: the delegation transition must not wait on user
+			// interaction. The button re-resolves the canonical state, so a stale
+			// click can only ever be a no-op.
+			void this.notifyStageStuck(state, mode, count, report.valid)
+		} catch (error) {
+			this.log(
+				`[reopenParentFromDelegation] Stuck-stage diagnostics for task ${state.taskId} failed: ${
+					error instanceof Error ? error.message : String(error)
+				}. The restart is paused even without the notification.`,
+			)
+		}
+
+		return true
+	}
+
+	/**
+	 * The task's harness log identity, or `undefined` when unavailable.
+	 *
+	 * The restart diagnostics use it for trace binding only, so they must never
+	 * gate the routing decision: a task double without the hook (or a failing
+	 * resolve) degrades to the ambient context instead of throwing.
+	 */
+	private async safeHarnessLogContext(task: Task): Promise<HarnessLogContextInput | undefined> {
+		try {
+			return await task.getHarnessLogContext()
+		} catch {
+			return undefined
+		}
+	}
+
+	/**
+	 * Show the stuck-stage diagnostic and offer the harness-owned forced advance.
+	 *
+	 * Deliberately not awaited by the caller: the delegation transition must not
+	 * wait on user interaction. The button routes to `approveStageTask`, which
+	 * re-resolves the canonical state and asks for its own confirmation, so a
+	 * stale click can only ever be a no-op.
+	 */
+	private async notifyStageStuck(
+		state: TaskState,
+		mode: string,
+		restartCount: number,
+		artifactsValid: boolean,
+	): Promise<void> {
+		const choice = await vscode.window.showWarningMessage(
+			`Task ${state.taskId}: the ${mode} stage restarted ${restartCount} times without reporting its outcome ` +
+				`(no "${STAGE_RESULT_MARKER} ..." line), so automatic restarts are paused. ` +
+				`Review the stage artifacts${artifactsValid ? " — structural validation passed" : ""}; ` +
+				`if they look complete, force-advance the lifecycle.`,
+			"Force Advance Stage",
+		)
+
+		if (choice === "Force Advance Stage") {
+			await this.approveStageTask()
+		}
+	}
+
+	/**
 	 * Assert that `mode` exists in the user's configuration before a harness stage
 	 * is delegated to it. Shared by the two runner construction sites so a missing
 	 * mode fails identically on both paths.
@@ -4653,6 +4813,98 @@ export class ClineProvider
 	}
 
 	/**
+	 * Force-advance a stage that keeps restarting without reporting its outcome.
+	 *
+	 * The complement of the stuck-stop in `reopenParentFromDelegation`: after
+	 * `MAX_MARKER_LESS_STAGE_RESTARTS` consecutive marker-less completions the
+	 * harness paused the auto-restart loop, and the user has now reviewed the
+	 * stage artifacts and confirms the work is complete. Mirrors
+	 * `resumeBlockedTask` and `approveQaTask`: the confirmation is the explicit
+	 * signal the lifecycle contract requires, and `HarnessModeRunner.approveStage`
+	 * routes it through the ordinary controller decisions — the stage is derived
+	 * from the canonical state, never from the child that happened to complete.
+	 */
+	public async approveStageTask(): Promise<void> {
+		const task = this.getCurrentTask()
+		if (!task) {
+			await vscode.window.showInformationMessage("No active task to advance.")
+			return
+		}
+
+		let state: TaskState
+		try {
+			state = await new TaskStateResolver().resolve(await task.getTaskContext())
+		} catch (error) {
+			this.log(
+				`[approveStageTask] Could not resolve the task state: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+			await vscode.window.showErrorMessage("Could not read the task lifecycle state.")
+			return
+		}
+
+		const mode = STAGE_ENTRY_MODES[state.status]
+		if (!mode) {
+			await vscode.window.showInformationMessage(
+				`Task ${state.taskId} is not waiting at a stage entry (status: ${state.status}); nothing to force-advance.`,
+			)
+			return
+		}
+
+		if (this.hasStageInFlight(task.taskId)) {
+			await vscode.window.showInformationMessage(
+				`Task ${state.taskId} still has a stage running; wait for it to finish before force-advancing.`,
+			)
+			return
+		}
+
+		// The user decision needs the artifact facts on the table: this is the
+		// same structural check the scheduler gates on, so its counts tell the
+		// user whether the stage's work actually looks complete.
+		const report = await new ArtifactValidator().validate(await task.getTaskContext(), { status: state.status })
+		const validation = report.valid
+			? "structural artifact validation passed"
+			: `structural artifact validation reports ${report.errors.length} error(s) and ${report.warnings.length} warning(s)`
+
+		const confirmation = await vscode.window.showWarningMessage(
+			`Force-advance task ${state.taskId}? The ${mode} stage kept restarting without reporting its outcome. ` +
+				`Review the stage artifacts first (${validation}); confirming reports their outcome as ` +
+				`"${STAGE_RESULT_MARKER} ${STAGE_SUCCESS_RESULTS[mode]}" and starts the next stage.`,
+			{ modal: true },
+			"Force Advance",
+		)
+
+		if (confirmation !== "Force Advance") {
+			return
+		}
+
+		try {
+			const result = await this.harnessModeRunner(task.taskId).approveStage(task, {
+				requirePlanApproval: this.requirePlanApproval(),
+			})
+
+			if (!result) {
+				await vscode.window.showWarningMessage(
+					`Task ${state.taskId} could not be force-advanced; the harness left it unchanged.`,
+				)
+				return
+			}
+
+			this.stageRestartBudgets.delete(task.taskId)
+		} catch (error) {
+			this.log(
+				`[approveStageTask] Force-advance failed: ${error instanceof Error ? error.message : String(error)}`,
+			)
+			await vscode.window.showErrorMessage(
+				`Failed to force-advance task ${state.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		}
+	}
+
+	/**
 	 * Approve the plan of `task` from inside the running task itself (the
 	 * `approve_plan` tool).
 	 *
@@ -5005,6 +5257,13 @@ export class ClineProvider
 							{ requirePlanApproval },
 						)
 
+						// A routed outcome advanced the lifecycle, so any restart
+						// budget spent by the same chain belongs to a loop that no
+						// longer exists.
+						if (lifecycleResult) {
+							this.stageRestartBudgets.delete(parentTaskId)
+						}
+
 						// A stage-child that finished without the outcome marker lost its
 						// report: the state-only continue cannot know a finding the stage
 						// never named. Before degrading, ask the same mode once to re-report
@@ -5022,6 +5281,20 @@ export class ClineProvider
 								: null
 
 						if (reaskResult) {
+							this.cancelledDelegationChildIds.delete(childTaskId)
+							return true
+						}
+
+						// A completion without a usable marker means the report is lost;
+						// when the canonical state still routes to the same stage, the
+						// continue below would delegate a fresh child of that stage and the
+						// loop can repeat forever (the model never writes the marker line).
+						// Count the restarts and, once the budget is spent, pause the
+						// chain for a human decision instead of another silent restart.
+						if (
+							lifecycleResult === null &&
+							(await this.shouldPauseStageRestart(parentTaskId, parentInstance, childHistory))
+						) {
 							this.cancelledDelegationChildIds.delete(childTaskId)
 							return true
 						}

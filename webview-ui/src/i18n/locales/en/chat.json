@@ -18,6 +18,9 @@
 		"openApiHistory": "Open API History",
 		"openUiHistory": "Open UI History",
 		"resumeBlockedTask": "Resume blocked task",
+		"approvePlan": "Approve plan",
+		"approveQa": "Confirm QA",
+		"approveStage": "Force-advance stuck stage",
 		"backToParentTask": "Parent task",
 		"waitingOnSubtask": "Waiting on subtask",
 		"goToSubtask": "Go to subtask"
