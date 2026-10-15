@@ -29,6 +29,7 @@
 	"command.resumeBlockedTask.title": "Resume Blocked Task",
 	"command.continueTaskLifecycle.title": "Continue Task Lifecycle",
 	"command.approvePlan.title": "Approve Plan",
+	"command.approveQa.title": "Confirm QA",
 	"command.registerHarnessLogsMcp.title": "Register Harness Log MCP Server",
 	"configuration.title": "Zoo Code",
 	"commands.allowedCommands.description": "Commands that can be auto-executed when 'Always approve execute operations' is enabled",

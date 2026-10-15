@@ -50,8 +50,6 @@ export const openRouterModelSchema = modelRouterBaseModelSchema.extend({
 	supported_parameters: z.array(z.string()).optional(),
 })
 
-export type OpenRouterModel = z.infer<typeof openRouterModelSchema>
-
 /**
  * OpenRouterModelEndpoint
  */
@@ -60,8 +58,6 @@ export const openRouterModelEndpointSchema = modelRouterBaseModelSchema.extend({
 	provider_name: z.string(),
 	tag: z.string().optional(),
 })
-
-export type OpenRouterModelEndpoint = z.infer<typeof openRouterModelEndpointSchema>
 
 /**
  * OpenRouterModelsResponse

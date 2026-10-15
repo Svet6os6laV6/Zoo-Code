@@ -31,6 +31,7 @@ import {
 	CanonicalReadmeError,
 	CanonicalReadmeWriter,
 	clearedFailureFields,
+	NO_BLOCKED_FROM,
 	NO_CURRENT_TASK,
 	NO_FAILURE_KEY,
 	readCanonicalFields,
@@ -70,13 +71,15 @@ type TransitionJournal = {
  * Grouped instead of passed positionally: `failure` and `journal` are optional,
  * so a positional call would need `undefined` placeholders to reach `nextStep`.
  * An omitted `nextStep` means "leave the pointer alone" — the scheduler owns it
- * when it assigns an implementation unit.
+ * when it assigns an implementation unit. `blockedFrom` is present only on the
+ * `BLOCKED` stop that records it; every other write clears a stale origin.
  */
 type CanonicalStateWrite = {
 	readonly status: TaskStatus
 	readonly failure?: FailureTracking
 	readonly journal?: TransitionJournal
 	readonly nextStep?: string
+	readonly blockedFrom?: TaskStatus
 }
 
 /**
@@ -153,10 +156,25 @@ export class ModeRunner {
 					failure: decision.failure,
 					journal: { decision: decision.type, reason: decision.reason },
 					nextStep: nextStepForStatus(decision.status),
+					blockedFrom: decision.blockedFrom,
 				})
 				return { type: "stopped", status: decision.status, reason: decision.reason }
 
-			case "start_mode":
+			case "start_mode": {
+				// A decision that carries failure tracking is either a Code fix pass
+				// or a re-verification by the requesting stage; the pointer names
+				// which, so a human reading the README can tell a fix pass from an
+				// ordinary stage run (the `QA_READY` marker alone does not).
+				const finding = decision.failure?.key ?? "an unnamed finding"
+				const attempts = decision.failure?.attempts
+				const fixInFlight = decision.failure !== undefined && (attempts ?? 0) > 0
+				const nextStep =
+					fixInFlight && decision.mode === "code"
+						? `Run the code fix pass for ${finding} (attempt ${attempts}).`
+						: fixInFlight
+							? `Re-run the ${decision.mode} stage to verify the fix for ${finding}.`
+							: `Run the ${decision.mode} stage.`
+
 				// Start the stage before advancing the canonical state: a stage that
 				// cannot be created must not leave the README claiming a stage that never
 				// ran (the reported `REVIEW_PASSED` without a QA phase). The write then
@@ -174,10 +192,16 @@ export class ModeRunner {
 				await this.writeStateAfterStart(context, {
 					status: decision.status,
 					failure: decision.failure,
-					journal: { decision: decision.type, reason: `started the ${decision.mode} stage` },
-					nextStep: `Run the ${decision.mode} stage.`,
+					journal: {
+						decision: decision.type,
+						reason: fixInFlight
+							? `started the ${decision.mode} fix pass`
+							: `started the ${decision.mode} stage`,
+					},
+					nextStep,
 				})
 				return { type: "started", mode: decision.mode, status: decision.status }
+			}
 
 			case "schedule_implementation": {
 				const assignment = await this.scheduler.assignNext(context, { ...state, status: decision.status })
@@ -292,7 +316,7 @@ export class ModeRunner {
 	 * rather than silently swallowed.
 	 */
 	private async writeState(context: TaskContext, write: CanonicalStateWrite): Promise<void> {
-		const { status, failure, journal, nextStep } = write
+		const { status, failure, journal, nextStep, blockedFrom } = write
 		const readme = await this.fileSystem.readFile(readmePath(context.taskRoot), "utf8")
 		const current = readCanonicalFields(readme)
 		const fields: CanonicalReadmeFields = {}
@@ -318,6 +342,10 @@ export class ModeRunner {
 			if (current.failureAttempts !== attempts) {
 				fields["Failure Attempts"] = attempts
 			}
+			const total = String(failure.total)
+			if (current.totalFailureAttempts !== total) {
+				fields["Total Failure Attempts"] = total
+			}
 		} else {
 			// Clearing also completes a protocol v2 block that never had the failure
 			// fields, but only when a field actually changes: an already-canonical
@@ -329,6 +357,19 @@ export class ModeRunner {
 			if (current.failureAttempts !== cleared["Failure Attempts"]) {
 				fields["Failure Attempts"] = cleared["Failure Attempts"]
 			}
+			if (current.totalFailureAttempts !== cleared["Total Failure Attempts"]) {
+				fields["Total Failure Attempts"] = cleared["Total Failure Attempts"]
+			}
+		}
+
+		// The `Blocked From` origin is recorded by the `BLOCKED` stop and cleared by
+		// every other write, so a future block can never resume to a stale origin.
+		if (status === "BLOCKED" && blockedFrom) {
+			if (current.blockedFrom !== blockedFrom) {
+				fields["Blocked From"] = blockedFrom
+			}
+		} else if (current.blockedFrom !== null && current.blockedFrom !== NO_BLOCKED_FROM) {
+			fields["Blocked From"] = NO_BLOCKED_FROM
 		}
 
 		if (Object.keys(fields).length === 0) {

@@ -50,7 +50,12 @@ Failure Attempts: 0
 
 		// Code reports a cause the harness cannot remove on its own.
 		const blocked = controller.transition(state, { mode: "code", result: "BLOCKED", failureKey: null })
-		expect(blocked).toEqual({ type: "stop", status: "BLOCKED", reason: "blocked" })
+		expect(blocked).toEqual({
+			type: "stop",
+			status: "BLOCKED",
+			reason: "blocked",
+			blockedFrom: "IMPLEMENTATION",
+		})
 
 		const stopped = await runner.run(context, state, blocked)
 		expect(stopped).toEqual({ type: "stopped", status: "BLOCKED", reason: "blocked" })
@@ -62,6 +67,7 @@ Failure Attempts: 0
 		const blockedReadme = fileSystem.files.get(readmePath) ?? ""
 		expect(blockedReadme).toContain("Status: BLOCKED")
 		expect(blockedReadme).toContain("Current Task: NONE")
+		expect(blockedReadme).toContain("Blocked From: IMPLEMENTATION")
 
 		// A confirmed Unblock Condition resumes the task and assigns T03 again.
 		const blockedState = await resolver.resolve(context)
@@ -79,6 +85,67 @@ Failure Attempts: 0
 		expect(readme).toContain("Current Task: implementation/T03-max-client-config.md")
 		expect(readme).toContain("Failure Key: NONE")
 		expect(readme).toContain("Failure Attempts: 0")
+		// Leaving BLOCKED clears the recorded origin, so a future block can never
+		// resume to a stale status.
+		expect(readme).toContain("Blocked From: NONE")
+	})
+
+	/**
+	 * The regression for the lossy resume: a task blocked while it sat on a review
+	 * entry status must resume back into the review stage — not fall into the
+	 * implementation queue and replay the already-passed stages. Before the
+	 * `Blocked From` origin this round trip re-ran Refactor on a finished DAG.
+	 */
+	it("resumes a task blocked at READY_FOR_REVIEW back into the reviewer stage", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: `Protocol Version: 2
+Task: SITESUP-1119
+Status: READY_FOR_REVIEW
+Current Task: NONE
+`,
+		})
+		const resolver = new TaskStateResolver(fileSystem)
+		const starts: string[] = []
+		const runner = new ModeRunner(
+			async (mode) => {
+				starts.push(mode)
+			},
+			new TaskScheduler(fileSystem),
+			fileSystem,
+		)
+
+		const state = await resolver.resolve(context)
+		expect(state.status).toBe("READY_FOR_REVIEW")
+
+		const blocked = controller.transition(state, { mode: "reviewer", result: "BLOCKED", failureKey: null })
+		// `LifecycleResult` is a union; asserting the whole decision keeps the
+		// `blockedFrom` origin visible without an unsafe property access.
+		expect(blocked).toEqual({
+			type: "stop",
+			status: "BLOCKED",
+			reason: "blocked",
+			blockedFrom: "READY_FOR_REVIEW",
+		})
+		expect(await runner.run(context, state, blocked)).toEqual({
+			type: "stopped",
+			status: "BLOCKED",
+			reason: "blocked",
+		})
+
+		const blockedState = await resolver.resolve(context)
+		expect(blockedState.status).toBe("BLOCKED")
+		expect(blockedState.blockedFrom).toBe("READY_FOR_REVIEW")
+
+		const decision = controller.resume(blockedState, true)
+		expect(decision).toEqual({ type: "start_mode", status: "READY_FOR_REVIEW", mode: "reviewer" })
+
+		const result = await runner.run(context, blockedState, decision)
+		expect(result).toEqual({ type: "started", mode: "reviewer", status: "READY_FOR_REVIEW" })
+		expect(starts).toEqual(["reviewer"])
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Status: READY_FOR_REVIEW")
+		expect(readme).toContain("Blocked From: NONE")
 	})
 
 	it("does not resume while the Unblock Condition is unconfirmed", async () => {

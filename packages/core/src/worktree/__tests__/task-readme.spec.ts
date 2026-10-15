@@ -9,6 +9,7 @@ import {
 	clearedFailureFields,
 	NO_FAILURE_ATTEMPTS,
 	NO_FAILURE_KEY,
+	NO_TOTAL_FAILURE_ATTEMPTS,
 	readmePath,
 	readCanonicalFields,
 	writeCanonicalFields,
@@ -39,6 +40,8 @@ function readyState(): TaskState {
 		currentTaskArtifact: null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 	}
 }
 
@@ -86,6 +89,8 @@ describe("canonical README block", () => {
 			nextStep: "Ship it.",
 			failureKey: "auth-token-expiry",
 			failureAttempts: "2",
+			totalFailureAttempts: null,
+			blockedFrom: null,
 		})
 	})
 
@@ -96,6 +101,8 @@ describe("canonical README block", () => {
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
+			totalFailureAttempts: null,
+			blockedFrom: null,
 		})
 	})
 
@@ -122,6 +129,7 @@ Next Step: Start implementation.
 		expect(clearedFailureFields()).toEqual({
 			"Failure Key": NO_FAILURE_KEY,
 			"Failure Attempts": NO_FAILURE_ATTEMPTS,
+			"Total Failure Attempts": NO_TOTAL_FAILURE_ATTEMPTS,
 		})
 	})
 
@@ -179,6 +187,8 @@ describe("CanonicalReadmeWriter", () => {
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
+			totalFailureAttempts: null,
+			blockedFrom: null,
 		})
 		expect(update.after).toEqual({
 			status: "REVIEW_PASSED",
@@ -186,6 +196,8 @@ describe("CanonicalReadmeWriter", () => {
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
+			totalFailureAttempts: null,
+			blockedFrom: null,
 		})
 		expect(fileSystem.files.get(readmePath(taskRoot))).toContain("Status: REVIEW_PASSED")
 	})

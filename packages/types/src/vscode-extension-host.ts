@@ -504,6 +504,7 @@ export interface WebviewMessage {
 		| "resumeBlockedTask"
 		| "continueTaskLifecycle"
 		| "approvePlan"
+		| "approveQa"
 		| "cancelAutoApproval"
 		| "updateVSCodeSetting"
 		| "getVSCodeSetting"

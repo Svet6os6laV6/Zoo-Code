@@ -49,6 +49,8 @@ function state(overrides: Partial<TaskState> = {}): TaskState {
 		currentTaskArtifact: null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 		...overrides,
 	}
 }
@@ -278,6 +280,8 @@ describe("TaskScheduler instrumentation", () => {
 			nextStep: "Start implementation.",
 			failureKey: null,
 			failureAttempts: null,
+			totalFailureAttempts: null,
+			blockedFrom: null,
 		})
 		expect(mutation?.stateAfter).toEqual({
 			status: "IMPLEMENTATION",
@@ -285,6 +289,8 @@ describe("TaskScheduler instrumentation", () => {
 			nextStep: "Implement T02 (implementation/T02-worker.md).",
 			failureKey: "NONE",
 			failureAttempts: "0",
+			totalFailureAttempts: "0",
+			blockedFrom: "NONE",
 		})
 	})
 

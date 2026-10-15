@@ -47,19 +47,6 @@ export function ensureDirectoryExists(dirPath: string): void {
 }
 
 /**
- * Initialize workspace directories
- */
-export function initializeWorkspace(workspacePath: string): void {
-	const dirs = [getGlobalStorageDir(), getWorkspaceStorageDir(workspacePath), getLogsDir()]
-
-	for (const dir of dirs) {
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true })
-		}
-	}
-}
-
-/**
  * Get global storage directory
  */
 export function getGlobalStorageDir(): string {
@@ -79,6 +66,19 @@ export function getWorkspaceStorageDir(workspacePath: string): string {
  */
 export function getLogsDir(): string {
 	return path.join(getBaseStorageDir(), "logs")
+}
+
+/**
+ * Initialize workspace directories
+ */
+export function initializeWorkspace(workspacePath: string): void {
+	const dirs = [getGlobalStorageDir(), getWorkspaceStorageDir(workspacePath), getLogsDir()]
+
+	for (const dir of dirs) {
+		if (!fs.existsSync(dir)) {
+			fs.mkdirSync(dir, { recursive: true })
+		}
+	}
 }
 
 export const VSCodeMockPaths = {

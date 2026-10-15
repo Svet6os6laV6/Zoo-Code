@@ -244,7 +244,7 @@ describe("filterNativeToolsForMode - approve_plan availability", () => {
 	})
 
 	it("hides approve_plan from every stage mode", () => {
-		for (const mode of ["architect", "code", "refactor", "reviewer", "qa"]) {
+		for (const mode of ["sublimation", "code", "refactor", "reviewer", "qa"]) {
 			const result = filterNativeToolsForMode(nativeTools, mode, undefined, undefined, undefined, {})
 
 			expect(names(result)).not.toContain("approve_plan")

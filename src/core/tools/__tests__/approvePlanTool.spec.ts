@@ -42,6 +42,8 @@ const stateWith = (status: TaskStatus) => ({
 	currentTaskArtifact: null,
 	failureKey: null,
 	failureAttempts: 0,
+	totalFailureAttempts: 0,
+	blockedFrom: null,
 })
 
 const approvedOutcome = (overrides: Partial<PlanApprovalOutcome> = {}): PlanApprovalOutcome => ({

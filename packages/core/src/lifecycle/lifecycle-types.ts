@@ -10,8 +10,13 @@ import type { ImplementationArtifacts } from "../worktree/txx-parser.js"
  * configures (built-in or custom) — the controller never assumes a mode's
  * behaviour, only that these five *stages* exist and that each one reports an
  * outcome in the protocol below.
+ *
+ * `sublimation` is the entry stage: it is the only mode that owns `ANALYSIS`,
+ * so it is the only mode that can start the cycle. The ordinary `architect`
+ * mode is deliberately outside this vocabulary, so planning with it never
+ * routes the lifecycle.
  */
-export const LIFECYCLE_MODES = ["architect", "code", "refactor", "reviewer", "qa"] as const
+export const LIFECYCLE_MODES = ["sublimation", "code", "refactor", "reviewer", "qa"] as const
 export const STAGE_RESULTS = [
 	"COMPLETED",
 	"PASSED",
@@ -34,6 +39,13 @@ export const STAGE_RESULTS = [
 	 * stops the lifecycle for a human.
 	 */
 	"BLOCKED",
+	/**
+	 * A defensive no-op report, not a stage outcome: the stage observes that it
+	 * was launched on a status its stage does not own, so it did nothing. The
+	 * parser accepts it (so the reply is not treated as a lost marker and the
+	 * decision log names it), but the controller refuses it for every mode — the
+	 * harness routes the task from the canonical state instead.
+	 */
 	"NOT_APPLICABLE",
 ] as const
 
@@ -76,10 +88,15 @@ export type StageOutcome = {
  * The key is the semantic id a failing stage may report; the count is owned by
  * the controller, never by the model. A `null` key means the stage named no
  * finding, which still forms its own bucket so an unnamed loop is bounded too.
+ *
+ * `total` counts every fix pass of the current remediation episode regardless of
+ * key: a model that relabels the same finding with a fresh key resets `attempts`
+ * but not `total`, so the global budget holds too.
  */
 export type FailureTracking = {
 	readonly key: string | null
 	readonly attempts: number
+	readonly total: number
 }
 
 export type LifecycleResult =
@@ -109,9 +126,17 @@ export type LifecycleResult =
 	| {
 			readonly type: "stop"
 			readonly status: TaskStatus
-			readonly reason: "done" | "pending" | "blocked" | "max-attempts" | "plan-approval"
+			readonly reason: "done" | "pending" | "blocked" | "max-attempts" | "max-total-attempts" | "plan-approval"
 			/** Present when a max-attempts stop must surface the exhausted finding. */
 			readonly failure?: FailureTracking
+			/**
+			 * The status the task held before the stop wrote `BLOCKED`. The
+			 * harness-owned resume action returns the task there instead of always
+			 * re-entering the implementation queue, so stages that already passed
+			 * are not re-run. Absent on legacy `BLOCKED` records, which resume to
+			 * `READY_FOR_IMPLEMENTATION` as before.
+			 */
+			readonly blockedFrom?: TaskStatus
 	  }
 	| { readonly type: "invalid"; readonly reason: string }
 
@@ -143,7 +168,7 @@ export type ModeRunResult =
 	| {
 			readonly type: "stopped"
 			readonly status: TaskStatus
-			readonly reason: "done" | "pending" | "blocked" | "max-attempts" | "plan-approval"
+			readonly reason: "done" | "pending" | "blocked" | "max-attempts" | "max-total-attempts" | "plan-approval"
 	  }
 	| { readonly type: "invalid"; readonly reason: string }
 
@@ -162,13 +187,26 @@ const STAGE_RESULT_PATTERN = new RegExp(`^\\s*${escapeForRegExp(STAGE_RESULT_MAR
 const STAGE_FAILURE_KEY_PATTERN = new RegExp(`^\\s*${escapeForRegExp(STAGE_FAILURE_KEY_MARKER)}\\s*(\\S+)\\s*$`, "gim")
 
 /**
+ * Strip trailing punctuation from a reported token.
+ *
+ * A model writes the marker in free-form prose, and `Stage Result: COMPLETED.`
+ * (one trailing period) is the common near-miss. Only the result token is
+ * stripped: the failure key is a model-chosen id compared for equality, so its
+ * identity is preserved exactly as the stage wrote it.
+ */
+function stripTrailingPunctuation(value: string): string {
+	return value.replace(/[.,;:!?]+$/, "")
+}
+
+/**
  * Read the outcome a stage reported, or `null` when the reply carries no
  * unambiguous result.
  *
  * Deliberately strict: the mode comes from runtime state, never from the text
  * (a model cannot route the lifecycle), and exactly one marker line must be
  * present. Anything else leaves the caller on its existing resume path instead of
- * guessing.
+ * guessing. The one tolerated deviation is trailing punctuation on the result
+ * token.
  */
 export function parseStageOutcome(mode: string, text: string): StageOutcome | null {
 	const parsedMode = lifecycleModeSchema.safeParse(mode)
@@ -194,6 +232,11 @@ export function parseStageOutcome(mode: string, text: string): StageOutcome | nu
 	const failureKey =
 		rawFailureKey === undefined || rawFailureKey.toUpperCase() === NO_FAILURE_KEY ? null : rawFailureKey
 
-	const parsedResult = stageResultSchema.safeParse(matches[0]?.[1]?.toUpperCase())
+	const rawResult = matches[0]?.[1]
+	if (!rawResult) {
+		return null
+	}
+
+	const parsedResult = stageResultSchema.safeParse(stripTrailingPunctuation(rawResult).toUpperCase())
 	return parsedResult.success ? { mode: parsedMode.data, result: parsedResult.data, failureKey } : null
 }

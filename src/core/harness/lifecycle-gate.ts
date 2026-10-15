@@ -17,7 +17,7 @@
 
 import * as path from "path"
 
-import type { TaskStatus } from "@roo-code/core"
+import { LIFECYCLE_MODES, type TaskStatus } from "@roo-code/core"
 
 /**
  * Canonical statuses that are harness-owned gates. No stage mode may run in
@@ -29,9 +29,10 @@ export type HarnessGateStatus = (typeof HARNESS_GATE_STATUSES)[number]
 
 /**
  * Runtime modes that own a lifecycle stage. Launching one of these while the
- * task sits on a harness-owned gate would bypass the gate.
+ * task sits on a harness-owned gate would bypass the gate. Derived from the
+ * domain vocabulary so this adapter list cannot drift from `LIFECYCLE_MODES`.
  */
-export const STAGE_MODES = ["architect", "code", "refactor", "reviewer", "qa"] as const
+export const STAGE_MODES = LIFECYCLE_MODES
 
 export type StageMode = (typeof STAGE_MODES)[number]
 
@@ -107,30 +108,61 @@ export function isPathInsideDirectory(targetPath: string, directory: string): bo
 export type ArtifactMutationGateDecision = GateDecision
 
 /**
+ * Whether `targetPath` is the canonical task README inside `artifactsRoot`.
+ *
+ * Compared on the two paths as given (the enforcement point resolves both to
+ * absolute paths), so a task-subdirectory README stays model-writable.
+ */
+export function isCanonicalReadme(targetPath: string, artifactsRoot: string): boolean {
+	return path.resolve(targetPath) === path.resolve(path.join(artifactsRoot, "README.md"))
+}
+
+/**
  * Whether a model file-mutation tool may write to `targetPath` while the task
  * is in `status`.
  *
- * The canonical task artifacts are read-only for model tools exactly while the
- * task sits on a harness-owned gate (`PLAN_READY`, `BLOCKED`): no stage mode
- * runs there, and the only way out is a harness-owned action. Every other
- * status is legitimate — the architect writes the plan in `ANALYSIS`, code
- * writes the assigned unit in `IMPLEMENTATION` — and every path outside the
- * artifacts root is untouched.
+ * Two rules, both protecting harness-owned state at the tool boundary:
+ *
+ * 1. On a harness-owned gate (`PLAN_READY`, `BLOCKED`) the whole artifacts root
+ *    is read-only for model tools: no stage mode runs there, and the only way
+ *    out is a harness-owned action.
+ * 2. Outside the gates, the canonical `README.md` stays read-only in every
+ *    status except `ANALYSIS`: the canonical block is harness-owned (only
+ *    `CanonicalReadmeWriter` and the scheduler write it), and a model edit that
+ *    corrupts it is detected only after the fact — a duplicate `Status:` line
+ *    makes the whole state resolver throw. `ANALYSIS` is the one exception:
+ *    the Sublimation stage authors the README there (it is a listed stage
+ *    artifact), so the gate does not block the authoring stage.
+ *
+ * Every other status and path combination is legitimate — code writes the
+ * assigned unit in `IMPLEMENTATION` — and every path outside the artifacts
+ * root is untouched.
  */
 export function evaluateArtifactMutationGate(
 	targetPath: string,
 	artifactsRoot: string,
 	status: TaskStatus,
 ): ArtifactMutationGateDecision {
-	if (!isHarnessGateStatus(status) || !isPathInsideDirectory(targetPath, artifactsRoot)) {
-		return { allowed: true }
+	if (isHarnessGateStatus(status) && isPathInsideDirectory(targetPath, artifactsRoot)) {
+		return {
+			allowed: false,
+			gate: "artifact-mutation",
+			reason: gateRejectionReason(status, "task artifacts are read-only for model tools"),
+		}
 	}
 
-	return {
-		allowed: false,
-		gate: "artifact-mutation",
-		reason: gateRejectionReason(status, "task artifacts are read-only for model tools"),
+	if (status !== "ANALYSIS" && isCanonicalReadme(targetPath, artifactsRoot)) {
+		return {
+			allowed: false,
+			gate: "artifact-mutation",
+			reason:
+				"The canonical task README is harness-owned: model tools may not modify it outside the " +
+				"ANALYSIS stage that authors it. Record stage output in the stage artifacts " +
+				"(handoff.md, the review report, qa.md) instead.",
+		}
 	}
+
+	return { allowed: true }
 }
 
 export type StageModeSwitchGateInput = {

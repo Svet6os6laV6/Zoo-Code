@@ -33,6 +33,13 @@ export type TaskState = {
 	readonly failureKey: string | null
 	/** Fix passes already spent on {@link failureKey}; `0` when no fix pass is running. */
 	readonly failureAttempts: number
+	/** Fix passes spent on every key in the current remediation episode, re-keyed or not. */
+	readonly totalFailureAttempts: number
+	/**
+	 * Status the task held before `BLOCKED` was written, or `null` when unknown
+	 * (a legacy record). The harness-owned resume returns the task there.
+	 */
+	readonly blockedFrom: TaskStatus | null
 }
 
 type TaskStateFileSystem = {
@@ -56,7 +63,7 @@ type TaskStateFileSystem = {
  */
 export const TASK_STATUS_TRANSITIONS = {
 	// `PLAN_READY` is the approval gate between analysis and implementation: when
-	// the plan needs a human confirmation, the completed Architect stage stops here
+	// the plan needs a human confirmation, the completed Sublimation stage stops here
 	// instead of handing straight to Code. The historical `READY_FOR_IMPLEMENTATION`
 	// and `IMPLEMENTATION` edges are kept so legacy artifacts and the parking paths
 	// keep working when the gate is off.
@@ -65,7 +72,16 @@ export const TASK_STATUS_TRANSITIONS = {
 	// edge is the harness-owned `approvePlan` action returning to the implementation
 	// queue. `BLOCKED` is deliberately absent — there is nothing to block mid-gate.
 	PLAN_READY: ["READY_FOR_IMPLEMENTATION"],
-	READY_FOR_IMPLEMENTATION: ["IMPLEMENTATION", "BLOCKED"],
+	READY_FOR_IMPLEMENTATION: [
+		"IMPLEMENTATION",
+		// The scheduler writes this when the queue opens on a drained DAG (every
+		// unit already done, e.g. a legacy record resumed): `assignNext` finds no
+		// ready unit and Refactor starts instead. Reached through the queue write
+		// of `schedule_implementation`/`resume_implementation`, so it is an edge of
+		// the canonical machine like any other written status.
+		"READY_FOR_REFACTOR",
+		"BLOCKED",
+	],
 	// `READY_FOR_IMPLEMENTATION` is the parking edge: an assigned unit that turned
 	// out not to be ready (a dependency on another unit was discovered) returns to
 	// the queue so the scheduler can recompute the DAG. It is not a remediation
@@ -85,11 +101,16 @@ export const TASK_STATUS_TRANSITIONS = {
 	REVIEW_PASSED: ["IMPLEMENTATION", "QA_READY", "DONE", "BLOCKED"],
 	QA_READY: ["IMPLEMENTATION", "REVIEW_PASSED", "DONE", "BLOCKED"],
 	DONE: [],
-	// The resume edge: a task stopped at `BLOCKED` returns to the implementation
-	// queue once the harness confirms the Unblock Condition. `BLOCKED` stays
-	// otherwise terminal — no stage outcome leaves it, only the harness-owned
-	// resume action does.
-	BLOCKED: ["READY_FOR_IMPLEMENTATION"],
+	// The resume edges: a task stopped at `BLOCKED` returns to the status it held
+	// before blocking once the harness confirms the Unblock Condition. The
+	// historical `READY_FOR_IMPLEMENTATION` edge is kept for legacy records with
+	// no recorded origin, and the stage-entry edges (`ANALYSIS`,
+	// `READY_FOR_REFACTOR`, `READY_FOR_REVIEW`, `REVIEW_PASSED`) let a blocked
+	// review/qa-stage task resume into its own stage instead of re-running the
+	// implementation pipeline that already passed. `BLOCKED` stays otherwise
+	// terminal — no stage outcome leaves it, only the harness-owned resume action
+	// does.
+	BLOCKED: ["READY_FOR_IMPLEMENTATION", "ANALYSIS", "READY_FOR_REFACTOR", "READY_FOR_REVIEW", "REVIEW_PASSED"],
 } as const satisfies Record<TaskStatus, readonly TaskStatus[]>
 
 export class TaskStateError extends Error {
@@ -158,6 +179,8 @@ export class TaskStateResolver {
 					currentTaskArtifact: null,
 					failureKey: null,
 					failureAttempts: 0,
+					totalFailureAttempts: 0,
+					blockedFrom: null,
 				}
 				decide(state, "task README does not exist yet; a new task starts in ANALYSIS", "missing-readme")
 				return state
@@ -197,6 +220,29 @@ export class TaskStateResolver {
 		}
 		const failureAttempts = rawFailureAttempts === undefined ? 0 : Number.parseInt(rawFailureAttempts, 10)
 
+		const rawTotalFailureAttempts = readField(readme, "Total Failure Attempts")
+		if (rawTotalFailureAttempts !== undefined && !/^\d+$/.test(rawTotalFailureAttempts)) {
+			const message = `Invalid Total Failure Attempts: ${rawTotalFailureAttempts}`
+			decide(null, message, "invalid-total-failure-attempts", { rawTotalFailureAttempts }, "warn")
+			throw new TaskStateError(message)
+		}
+		const totalFailureAttempts =
+			rawTotalFailureAttempts === undefined ? 0 : Number.parseInt(rawTotalFailureAttempts, 10)
+
+		// The origin a future resume returns to. `NONE` is the canonical sentinel
+		// for a `BLOCKED` record with no origin (legacy); an unknown status value
+		// is data corruption and rejected like an invalid failure counter.
+		const rawBlockedFrom = readField(readme, "Blocked From")
+		let blockedFrom: TaskStatus | null = null
+		if (rawBlockedFrom !== undefined && rawBlockedFrom !== "NONE") {
+			if (!isTaskStatus(rawBlockedFrom)) {
+				const message = `Invalid Blocked From: ${rawBlockedFrom}`
+				decide(null, message, "invalid-blocked-from", { rawBlockedFrom }, "warn")
+				throw new TaskStateError(message)
+			}
+			blockedFrom = rawBlockedFrom
+		}
+
 		const currentTaskValue = readField(readme, "Current Task")
 		if (!currentTaskValue) {
 			if (!isProtocolV2) {
@@ -207,6 +253,8 @@ export class TaskStateResolver {
 					currentTaskArtifact: null,
 					failureKey,
 					failureAttempts,
+					totalFailureAttempts,
+					blockedFrom,
 				}
 				decide(
 					state,
@@ -234,6 +282,8 @@ export class TaskStateResolver {
 				currentTaskArtifact: null,
 				failureKey,
 				failureAttempts,
+				totalFailureAttempts,
+				blockedFrom,
 			}
 			decide(state, "README declares no current implementation unit", "no-current-task", { normalizedStatus })
 			return state
@@ -265,6 +315,8 @@ export class TaskStateResolver {
 			currentTaskArtifact: path.join(context.taskRoot, ...currentTaskValue.split("/")),
 			failureKey,
 			failureAttempts,
+			totalFailureAttempts,
+			blockedFrom,
 		}
 		decide(state, "README resolved to an implementation unit", "resolved", {
 			normalizedStatus,

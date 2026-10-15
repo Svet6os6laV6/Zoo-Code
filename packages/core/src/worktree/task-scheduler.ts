@@ -25,6 +25,7 @@ import type { HarnessLoggerPort } from "../observability/types.js"
 import {
 	CanonicalReadmeError,
 	CanonicalReadmeWriter,
+	clearedBlockedFromFields,
 	clearedFailureFields,
 	readmePath,
 	type CanonicalReadmeUpdate,
@@ -191,13 +192,15 @@ export class TaskScheduler {
 			// The read-modify-write runs inside the shared per-taskRoot lock, so a
 			// concurrent lifecycle write cannot interleave between the read and the
 			// rename. Handing a fresh implementation unit to Code ends any remediation
-			// that was in flight, so the failure-tracking block is cleared with the
-			// assignment rather than left behind for the next stage to misread.
+			// or blocked state that was in flight, so the failure-tracking block and a
+			// recorded block origin are cleared with the assignment rather than left
+			// behind for the next stage to misread.
 			update = await writer.update(context.taskRoot, {
 				Status: "IMPLEMENTATION",
 				"Current Task": relativeArtifact,
 				"Next Step": `Implement ${next.id} (${relativeArtifact}).`,
 				...clearedFailureFields(),
+				...clearedBlockedFromFields(),
 			})
 		} catch (error) {
 			if (error instanceof CanonicalReadmeError) {
@@ -224,6 +227,8 @@ export class TaskScheduler {
 				currentTaskArtifact: next.artifact,
 				failureKey: null,
 				failureAttempts: 0,
+				totalFailureAttempts: 0,
+				blockedFrom: null,
 			},
 		}
 

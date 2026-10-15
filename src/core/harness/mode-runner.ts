@@ -28,7 +28,7 @@ type LifecycleTask = {
 
 type HarnessModeRunnerDependencies = {
 	readonly stateResolver?: Pick<TaskStateResolver, "resolve">
-	readonly controller?: Pick<LifecycleController, "transition" | "resume" | "resolve" | "approvePlan">
+	readonly controller?: Pick<LifecycleController, "transition" | "resume" | "resolve" | "approvePlan" | "approveQa">
 	readonly modeRunner?: Pick<ModeRunner, "run">
 	readonly parser?: Pick<TxxParser, "read">
 	readonly validator?: Pick<ArtifactValidator, "validate">
@@ -38,7 +38,10 @@ type HarnessModeRunnerDependencies = {
 
 export class HarnessModeRunner {
 	private readonly stateResolver: Pick<TaskStateResolver, "resolve">
-	private readonly controller: Pick<LifecycleController, "transition" | "resume" | "resolve" | "approvePlan">
+	private readonly controller: Pick<
+		LifecycleController,
+		"transition" | "resume" | "resolve" | "approvePlan" | "approveQa"
+	>
 	private readonly modeRunner: Pick<ModeRunner, "run">
 	private readonly parser: Pick<TxxParser, "read">
 	private readonly validator: Pick<ArtifactValidator, "validate">
@@ -113,12 +116,28 @@ export class HarnessModeRunner {
 	}
 
 	/**
+	 * Confirm the QA outcome of a task stopped at `QA_READY` (harness-owned).
+	 *
+	 * Mirrors `approvePlan`: the caller has already obtained the user's QA
+	 * confirmation — the explicit signal the lifecycle contract requires — and the
+	 * controller decides whether the state is actually confirmable. Returns `null`
+	 * when the confirmation is not routable (the task is not at `QA_READY`), so the
+	 * caller leaves the task unchanged instead of writing state.
+	 */
+	async approveQa(task: LifecycleTask): Promise<ModeRunResult | null> {
+		const context = await task.getTaskContext()
+		const state = await this.stateResolver.resolve(context)
+
+		return this.applyDecision(task, context, state, this.controller.approveQa(state))
+	}
+
+	/**
 	 * Advance the lifecycle from the current canonical state without a stage
 	 * outcome.
 	 *
 	 * Where `run` reacts to a stage that just reported its result, `continue`
 	 * reacts to a state that is already routable (for example `ANALYSIS` with a
-	 * complete plan after the Architect stage, or `IMPLEMENTATION` once a unit is
+	 * complete plan after the Sublimation stage, or `IMPLEMENTATION` once a unit is
 	 * done). It resolves the same three inputs the resolver expects — the canonical
 	 * state, the `implementation/` snapshot, and its structural validation report —
 	 * all from one filesystem moment so they cannot describe different DAGs.

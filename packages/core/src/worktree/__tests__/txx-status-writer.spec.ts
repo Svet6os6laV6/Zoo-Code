@@ -28,6 +28,16 @@ describe("parkImplementationTask", () => {
 		expect(fileSystem.files.get(artifact)).toBe("---\nstatus: TODO\ndepends_on:\n  - T03\n---\n\n# T02\n")
 	})
 
+	it("parks a tick-wrapped Status field the parser also reads", async () => {
+		const content = "## Status\n\n- `Status`: IN_PROGRESS\n"
+		const fileSystem = createInMemoryFileSystem({ [artifact]: content })
+
+		const result = await parkImplementationTask(fileSystem, artifact)
+
+		expect(result.type).toBe("parked")
+		expect(fileSystem.files.get(artifact)).toBe("## Status\n\n- `Status`: TODO\n")
+	})
+
 	it("leaves a DONE unit untouched", async () => {
 		const content = "## Status\nStatus: DONE\n"
 		const fileSystem = createInMemoryFileSystem({ [artifact]: content })

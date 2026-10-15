@@ -1013,6 +1013,8 @@ describe("Cline", () => {
 				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
 				failureKey: null,
 				failureAttempts: 0,
+				totalFailureAttempts: 0,
+				blockedFrom: null,
 			}
 			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
 			const snapshotWith = (status: "IN_PROGRESS" | "DONE"): ImplementationArtifacts => ({
@@ -1108,6 +1110,8 @@ describe("Cline", () => {
 				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
 				failureKey: null,
 				failureAttempts: 0,
+				totalFailureAttempts: 0,
+				blockedFrom: null,
 			}
 			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
 			const snapshotWith = (contentHash: string): ImplementationArtifacts => ({
@@ -1241,6 +1245,8 @@ describe("Cline", () => {
 				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
 				failureKey: null,
 				failureAttempts: 0,
+				totalFailureAttempts: 0,
+				blockedFrom: null,
 			}
 			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
 			const snapshot: ImplementationArtifacts = {
@@ -1307,6 +1313,8 @@ describe("Cline", () => {
 				currentTaskArtifact: "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation/T01-worker.md",
 				failureKey: null,
 				failureAttempts: 0,
+				totalFailureAttempts: 0,
+				blockedFrom: null,
 			}
 			const directory = "/mock/workspace/path/.roo/tasks/SITESUP-1116/implementation"
 			const snapshot: ImplementationArtifacts = {
@@ -1424,6 +1432,8 @@ describe("Cline", () => {
 					currentTaskArtifact: `${directory}/T04-a.md`,
 					failureKey: null,
 					failureAttempts: 0,
+					totalFailureAttempts: 0,
+					blockedFrom: null,
 				}
 				const assignNext = vi.fn()
 				const task = new Task({
@@ -1490,6 +1500,8 @@ describe("Cline", () => {
 						currentTaskArtifact: `${directory}/T05-b.md`,
 						failureKey: null,
 						failureAttempts: 0,
+						totalFailureAttempts: 0,
+						blockedFrom: null,
 					},
 					replaced: "T04",
 				})

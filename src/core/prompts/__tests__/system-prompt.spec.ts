@@ -261,6 +261,8 @@ describe("SYSTEM_PROMPT", () => {
 					currentTaskArtifact: "/test/path/.roo/tasks/SITESUP-1116/implementation/T02-worker-heartbeat.md",
 					failureKey: null,
 					failureAttempts: 0,
+					totalFailureAttempts: 0,
+					blockedFrom: null,
 				},
 			},
 		)
@@ -738,6 +740,8 @@ describe("SYSTEM_PROMPT harness observability", () => {
 			currentTaskArtifact: "/test/path/.roo/tasks/SITESUP-1116/implementation/T02-worker.md",
 			failureKey: null,
 			failureAttempts: 0,
+			totalFailureAttempts: 0,
+			blockedFrom: null,
 		},
 	}
 

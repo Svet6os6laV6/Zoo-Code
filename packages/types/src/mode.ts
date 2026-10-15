@@ -185,6 +185,19 @@ export const DEFAULT_MODES: readonly ModeConfig[] = [
 			'1. Do some information gathering (using provided tools) to get more context about the task.\n\n2. You should also ask the user clarifying questions to get a better understanding of the task.\n\n3. Once you\'ve gained more context about the user\'s request, break down the task into clear, actionable steps and create a todo list using the `update_todo_list` tool. Each todo item should be:\n   - Specific and actionable\n   - Listed in logical execution order\n   - Focused on a single, well-defined outcome\n   - Clear enough that another mode could execute it independently\n\n   **Note:** If the `update_todo_list` tool is not available, write the plan to a markdown file (e.g., `plan.md` or `todo.md`) instead.\n\n4. As you gather more information or discover new requirements, update the todo list to reflect the current understanding of what needs to be accomplished.\n\n5. Ask the user if they are pleased with this plan, or if they would like to make any changes. Think of this as a brainstorming session where you can discuss the task and refine the todo list.\n\n6. Include Mermaid diagrams if they help clarify complex workflows or system architecture. Please avoid using double quotes ("") and parentheses () inside square brackets ([]) in Mermaid diagrams, as this can cause parsing errors.\n\n7. Use the switch_mode tool to request that the user switch to another mode to implement the solution.\n\n**IMPORTANT: Focus on creating clear, actionable todo lists rather than lengthy markdown documents. Use the todo list as your primary planning tool to track and organize the work that needs to be done.**\n\n**CRITICAL: Never provide level of effort time estimates (e.g., hours, days, weeks) for tasks. Focus solely on breaking down the work into clear, actionable steps without estimating how long they will take.**\n\nUnless told otherwise, if you want to save a plan file, put it in the ./plans directory (a directory named "plans" relative to the workspace root, not the absolute filesystem path /plans)',
 	},
 	{
+		slug: "sublimation",
+		name: "🧊 Sublimation",
+		roleDefinition:
+			"You are Zoo, the analysis stage of the harness lifecycle. You gather information and get context to produce the implementation plan artifacts for the user's task. You never implement: once the analysis is complete you report the stage outcome, and the harness — not you — routes the rest of the cycle (code → refactor → reviewer → qa).",
+		whenToUse:
+			"Use this mode to start the harness lifecycle (sublimation → code → refactor → reviewer → qa). It is the only mode that starts the cycle; use the architect mode for ordinary planning that must not run the cycle.",
+		description: "Start the harness lifecycle at the analysis stage",
+		groups: ["read", ["edit", { fileRegex: "\\.md$", description: "Markdown files only" }], "mcp"],
+		customInstructions:
+			// The marker literal must match STAGE_RESULT_MARKER in packages/core (types cannot import core).
+			"1. Do some information gathering (using provided tools) to get more context about the task.\n\n2. Produce the implementation plan artifacts in the task artifact directory: implementation-plan.md and the implementation/ directory with one unit markdown file per schedulable unit.\n\n3. Report the semantic outcome as exactly one 'Stage Result: <RESULT>' line: COMPLETED when the plan artifacts are ready, BLOCKED for obstacles the harness cannot remove itself (a user decision, missing credentials, an unavailable external service). Do not select the next mode or lifecycle status.",
+	},
+	{
 		slug: "code",
 		name: "💻 Code",
 		roleDefinition:

@@ -27,7 +27,11 @@ vi.mock("../../tools/validateToolUse", async (importOriginal) => {
 	}
 })
 
-vi.mock("@roo-code/core", () => ({
+vi.mock("@roo-code/core", async (importOriginal) => ({
+	// Spread the actual exports: the module's runtime vocabulary (e.g.
+	// `LIFECYCLE_MODES`) reaches this spec through `lifecycle-gate.ts`, so a
+	// partial factory that drops it fails at import time.
+	...(await importOriginal<Record<string, unknown>>()),
 	customToolRegistry: {
 		has: vi.fn(() => false),
 		get: vi.fn(),

@@ -33,6 +33,8 @@ function state(status: TaskState["status"], currentTask: string | null = null): 
 		currentTaskArtifact: currentTask ? path.join(implementation, `${currentTask}-unit.md`) : null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 	}
 }
 
@@ -66,13 +68,13 @@ describe("lifecycle transition journal", () => {
 
 		const statuses: (string | null)[] = [readmeStatus(fileSystem)]
 
-		// ANALYSIS -> PLAN_READY: the Architect completed and the approval gate is on.
+		// ANALYSIS -> PLAN_READY: the Sublimation stage completed and the approval gate is on.
 		await runner.run(
 			context,
 			state("ANALYSIS"),
 			controller.transition(
 				state("ANALYSIS"),
-				{ mode: "architect", result: "COMPLETED", failureKey: null },
+				{ mode: "sublimation", result: "COMPLETED", failureKey: null },
 				{ requirePlanApproval: true },
 			),
 		)

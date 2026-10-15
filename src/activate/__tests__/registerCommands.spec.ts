@@ -139,7 +139,12 @@ describe("getVisibleProviderOrLog", () => {
 describe("registerCommands handlers", () => {
 	let mockOutputChannel: vscode.OutputChannel
 	let mockContext: vscode.ExtensionContext
-	let mockVisibleProvider: { postMessageToWebview: Mock; resumeBlockedTask: Mock; approvePlanTask: Mock }
+	let mockVisibleProvider: {
+		postMessageToWebview: Mock
+		resumeBlockedTask: Mock
+		approvePlanTask: Mock
+		approveQaTask: Mock
+	}
 	let mockProvider: { postMessageToWebview: Mock }
 	let mockHarness: HarnessCommandHandlers
 	let handlers: Record<string, (...args: unknown[]) => unknown>
@@ -172,6 +177,7 @@ describe("registerCommands handlers", () => {
 			postMessageToWebview: vi.fn().mockResolvedValue(undefined),
 			resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
 			approvePlanTask: vi.fn().mockResolvedValue(undefined),
+			approveQaTask: vi.fn().mockResolvedValue(undefined),
 		}
 
 		mockProvider = {
@@ -434,6 +440,21 @@ describe("registerCommands handlers", () => {
 		await handlers["zoo-code.approvePlan"]()
 
 		expect(mockVisibleProvider.approvePlanTask).not.toHaveBeenCalled()
+	})
+
+	it("approveQa delegates to the visible provider", async () => {
+		await handlers["zoo-code.approveQa"]()
+
+		expect(mockVisibleProvider.approveQaTask).toHaveBeenCalledTimes(1)
+	})
+
+	it("approveQa logs to outputChannel when the provider throws", async () => {
+		const boom = new Error("qa confirm failed")
+		mockVisibleProvider.approveQaTask.mockRejectedValue(boom)
+
+		await handlers["zoo-code.approveQa"]()
+
+		expect(mockOutputChannel.appendLine).toHaveBeenCalledWith(`[approveQa] failed: ${boom}`)
 	})
 
 	it("openHarnessLogViewer delegates to the injected log viewer handler", async () => {

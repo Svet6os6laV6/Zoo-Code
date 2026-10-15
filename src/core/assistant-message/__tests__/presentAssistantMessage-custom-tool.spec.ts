@@ -16,7 +16,11 @@ vi.mock("../../tools/validateToolUse", () => ({
 }))
 
 // Mock custom tool registry - must be done inline without external variable references
-vi.mock("@roo-code/core", () => ({
+vi.mock("@roo-code/core", async (importOriginal) => ({
+	// Spread the actual exports: the module's runtime vocabulary (e.g.
+	// `LIFECYCLE_MODES`) reaches this spec through `lifecycle-gate.ts`, so a
+	// partial factory that drops it fails at import time.
+	...(await importOriginal<Record<string, unknown>>()),
 	customToolRegistry: {
 		has: vi.fn(),
 		get: vi.fn(),

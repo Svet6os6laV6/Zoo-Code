@@ -214,6 +214,9 @@ describe("History resume delegation - parent metadata transitions", () => {
 		let currentTask: object | undefined = { taskId: childItem.id }
 		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
 		const provider = makeProviderStub({
+			// The re-ask layer is declined here: this test exercises the
+			// state-only continue fallback, not the marker re-ask child.
+			requestStageOutcomeReask: vi.fn().mockResolvedValue(false),
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
 			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
 			getCurrentTask: vi.fn(() => currentTask),
@@ -266,6 +269,9 @@ describe("History resume delegation - parent metadata transitions", () => {
 		let currentTask: object | undefined = { taskId: childItem.id }
 		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
 		const provider = makeProviderStub({
+			// The re-ask layer is declined here: this test exercises the
+			// state-only continue fallback, not the marker re-ask child.
+			requestStageOutcomeReask: vi.fn().mockResolvedValue(false),
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
 			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
 			getCurrentTask: vi.fn(() => currentTask),
@@ -315,6 +321,9 @@ describe("History resume delegation - parent metadata transitions", () => {
 		let currentTask: object | undefined = { taskId: childItem.id }
 		const schedule = vi.fn(async (_task: Task, run: () => Promise<void>) => run())
 		const provider = makeProviderStub({
+			// The re-ask layer is declined here: this test exercises the
+			// state-only continue fallback, not the marker re-ask child.
+			requestStageOutcomeReask: vi.fn().mockResolvedValue(false),
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
 			getTaskWithId: vi.fn().mockResolvedValue({ historyItem: parentItem }),
 			getCurrentTask: vi.fn(() => currentTask),

@@ -8,6 +8,7 @@ import {
 	LIFECYCLE_MODES,
 	LifecycleController,
 	MAX_FAILURE_ATTEMPTS,
+	MAX_TOTAL_FAILURE_ATTEMPTS,
 	MODE_STATUSES,
 	STAGE_RESULTS,
 	parseStageOutcome,
@@ -23,6 +24,8 @@ function state(status: TaskState["status"], overrides: Partial<TaskState> = {}):
 		currentTaskArtifact: null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 		...overrides,
 	}
 }
@@ -31,7 +34,7 @@ describe("LifecycleController", () => {
 	it.each([
 		// The default gate stops a completed analysis at the approval gate instead of
 		// handing straight to Code.
-		["ANALYSIS", "architect", "COMPLETED", { type: "stop", status: "PLAN_READY", reason: "plan-approval" }],
+		["ANALYSIS", "sublimation", "COMPLETED", { type: "stop", status: "PLAN_READY", reason: "plan-approval" }],
 		[
 			"IMPLEMENTATION",
 			"code",
@@ -55,14 +58,14 @@ describe("LifecycleController", () => {
 			"READY_FOR_REFACTOR",
 			"refactor",
 			"FUNCTIONAL_DEFECT",
-			{ type: "start_mode", status: "REFACTOR", mode: "code", failure: { key: null, attempts: 1 } },
+			{ type: "start_mode", status: "REFACTOR", mode: "code", failure: { key: null, attempts: 1, total: 1 } },
 		],
 		["READY_FOR_REVIEW", "reviewer", "PASSED", { type: "start_mode", status: "REVIEW_PASSED", mode: "qa" }],
 		[
 			"READY_FOR_REVIEW",
 			"reviewer",
 			"REQUIRED",
-			{ type: "start_mode", status: "REVIEW", mode: "code", failure: { key: null, attempts: 1 } },
+			{ type: "start_mode", status: "REVIEW", mode: "code", failure: { key: null, attempts: 1, total: 1 } },
 		],
 		["REVIEW", "reviewer", "PASSED", { type: "start_mode", status: "REVIEW_PASSED", mode: "qa" }],
 		["REVIEW_PASSED", "qa", "PENDING", { type: "stop", status: "QA_READY", reason: "pending" }],
@@ -71,7 +74,7 @@ describe("LifecycleController", () => {
 			"REVIEW_PASSED",
 			"qa",
 			"FAILED",
-			{ type: "start_mode", status: "QA_READY", mode: "code", failure: { key: null, attempts: 1 } },
+			{ type: "start_mode", status: "QA_READY", mode: "code", failure: { key: null, attempts: 1, total: 1 } },
 		],
 		["QA_READY", "qa", "PASSED", { type: "stop", status: "DONE", reason: "done" }],
 	] as const)("maps %s + %s/%s without asking the model for the next mode", (status, mode, result, expected) => {
@@ -83,14 +86,14 @@ describe("LifecycleController", () => {
 	it("schedules implementation from a completed analysis when the approval gate is off", () => {
 		const decision = controller.transition(
 			state("ANALYSIS"),
-			{ mode: "architect", result: "COMPLETED", failureKey: null },
+			{ mode: "sublimation", result: "COMPLETED", failureKey: null },
 			{ requirePlanApproval: false },
 		)
 
 		expect(decision).toEqual({ type: "schedule_implementation", status: "READY_FOR_IMPLEMENTATION" })
 	})
 
-	it("ignores the approval gate for every mode but architect", () => {
+	it("ignores the approval gate for every mode but sublimation", () => {
 		// A fix pass or an implementation unit is not the plan stage, so the gate
 		// must not alter their routing.
 		const decision = controller.transition(
@@ -109,14 +112,14 @@ describe("LifecycleController", () => {
 	] as const)("routes a completed fix pass from %s back to the requesting stage", (status, target, mode) => {
 		// The re-verification preserves whatever budget the fix pass had spent, so a
 		// finding that comes back is counted against the same key.
-		const source = state(status, { failureKey: "finding-a", failureAttempts: 2 })
+		const source = state(status, { failureKey: "finding-a", failureAttempts: 2, totalFailureAttempts: 2 })
 		const decision = controller.transition(source, { mode: "code", result: "COMPLETED", failureKey: null })
 
 		expect(decision).toEqual({
 			type: "start_mode",
 			status: target,
 			mode,
-			failure: { key: "finding-a", attempts: 2 },
+			failure: { key: "finding-a", attempts: 2, total: 2 },
 		})
 	})
 
@@ -127,7 +130,12 @@ describe("LifecycleController", () => {
 			failureKey: null,
 		})
 
-		expect(decision).toEqual({ type: "stop", status: "BLOCKED", reason: "blocked" })
+		expect(decision).toEqual({
+			type: "stop",
+			status: "BLOCKED",
+			reason: "blocked",
+			blockedFrom: "READY_FOR_REVIEW",
+		})
 	})
 
 	it("rejects RESCHEDULE_REQUIRED from a fix pass, which is not in the DAG", () => {
@@ -233,28 +241,34 @@ describe("LifecycleController", () => {
 	})
 
 	it("counts fix passes per failure key and resets when the key changes", () => {
-		const first = controller.transition(state("REVIEW", { failureKey: "finding-a", failureAttempts: 1 }), {
-			mode: "reviewer",
-			result: "REQUIRED",
-			failureKey: "finding-a",
-		})
+		const first = controller.transition(
+			state("REVIEW", { failureKey: "finding-a", failureAttempts: 1, totalFailureAttempts: 1 }),
+			{
+				mode: "reviewer",
+				result: "REQUIRED",
+				failureKey: "finding-a",
+			},
+		)
 		expect(first).toEqual({
 			type: "start_mode",
 			status: "REVIEW",
 			mode: "code",
-			failure: { key: "finding-a", attempts: 2 },
+			failure: { key: "finding-a", attempts: 2, total: 2 },
 		})
 
-		const other = controller.transition(state("REVIEW", { failureKey: "finding-a", failureAttempts: 2 }), {
-			mode: "reviewer",
-			result: "REQUIRED",
-			failureKey: "finding-b",
-		})
+		const other = controller.transition(
+			state("REVIEW", { failureKey: "finding-a", failureAttempts: 2, totalFailureAttempts: 2 }),
+			{
+				mode: "reviewer",
+				result: "REQUIRED",
+				failureKey: "finding-b",
+			},
+		)
 		expect(other).toEqual({
 			type: "start_mode",
 			status: "REVIEW",
 			mode: "code",
-			failure: { key: "finding-b", attempts: 1 },
+			failure: { key: "finding-b", attempts: 1, total: 3 },
 		})
 	})
 
@@ -268,7 +282,33 @@ describe("LifecycleController", () => {
 			type: "stop",
 			status: "BLOCKED",
 			reason: "max-attempts",
-			failure: { key: "finding-a", attempts: MAX_FAILURE_ATTEMPTS },
+			failure: { key: "finding-a", attempts: MAX_FAILURE_ATTEMPTS, total: 1 },
+			blockedFrom: "REVIEW",
+		})
+	})
+
+	it("stops at BLOCKED once the episode budget is exhausted across keys", () => {
+		// Relabelling the same finding resets the per-key counter but not the
+		// total, so the global budget holds even against key churn.
+		const decision = controller.transition(
+			state("REVIEW", {
+				failureKey: "finding-a",
+				failureAttempts: 1,
+				totalFailureAttempts: MAX_TOTAL_FAILURE_ATTEMPTS,
+			}),
+			{ mode: "reviewer", result: "REQUIRED", failureKey: "finding-b" },
+		)
+
+		expect(decision).toEqual({
+			type: "stop",
+			status: "BLOCKED",
+			reason: "max-total-attempts",
+			failure: {
+				key: "finding-b",
+				attempts: 1,
+				total: MAX_TOTAL_FAILURE_ATTEMPTS,
+			},
+			blockedFrom: "REVIEW",
 		})
 	})
 
@@ -283,7 +323,7 @@ describe("LifecycleController", () => {
 			type: "start_mode",
 			status: "REVIEW",
 			mode: "code",
-			failure: { key: null, attempts: 2 },
+			failure: { key: null, attempts: 2, total: 1 },
 		})
 	})
 
@@ -293,6 +333,60 @@ describe("LifecycleController", () => {
 		expect(decision).toEqual({ type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" })
 		// The resume edge is canonical, so the status the runner writes is reachable.
 		expect(isTaskStatusTransition("BLOCKED", "READY_FOR_IMPLEMENTATION")).toBe(true)
+	})
+
+	it.each([
+		["ANALYSIS", "ANALYSIS", "sublimation"],
+		["READY_FOR_REFACTOR", "READY_FOR_REFACTOR", "refactor"],
+		["READY_FOR_REVIEW", "READY_FOR_REVIEW", "reviewer"],
+		["REVIEW_PASSED", "REVIEW_PASSED", "qa"],
+	] as const)("resumes a task blocked at its %s stage entry back into that stage", (origin, target, mode) => {
+		const decision = controller.resume(state("BLOCKED", { blockedFrom: origin }), true)
+
+		expect(decision).toEqual({ type: "start_mode", status: target, mode })
+		// The resume edge is canonical, so the status the runner writes is reachable.
+		expect(isTaskStatusTransition("BLOCKED", target)).toBe(true)
+	})
+
+	it.each([
+		["REFACTOR", "READY_FOR_REFACTOR", "refactor"],
+		["REVIEW", "READY_FOR_REVIEW", "reviewer"],
+		["QA_READY", "REVIEW_PASSED", "qa"],
+	] as const)(
+		"resumes a task blocked mid-fix-pass from %s as a re-verification with the budget preserved",
+		(origin, target, mode) => {
+			const decision = controller.resume(
+				state("BLOCKED", {
+					blockedFrom: origin,
+					failureKey: "finding-a",
+					failureAttempts: 2,
+					totalFailureAttempts: 3,
+				}),
+				true,
+			)
+
+			expect(decision).toEqual({
+				type: "start_mode",
+				status: target,
+				mode,
+				failure: { key: "finding-a", attempts: 2, total: 3 },
+			})
+			expect(isTaskStatusTransition("BLOCKED", target)).toBe(true)
+		},
+	)
+
+	it("resumes a task blocked from IMPLEMENTATION back into the implementation queue", () => {
+		expect(controller.resume(state("BLOCKED", { blockedFrom: "IMPLEMENTATION" }), true)).toEqual({
+			type: "resume_implementation",
+			status: "READY_FOR_IMPLEMENTATION",
+		})
+	})
+
+	it("refuses to resume to a corrupted blocked origin", () => {
+		expect(controller.resume(state("BLOCKED", { blockedFrom: "DONE" }), true)).toEqual({
+			type: "invalid",
+			reason: "Cannot resume a task blocked from DONE",
+		})
 	})
 
 	it("refuses to resume before the Unblock Condition is confirmed", () => {
@@ -323,6 +417,24 @@ describe("LifecycleController", () => {
 			expect(controller.approvePlan(state(status))).toEqual({
 				type: "invalid",
 				reason: `Plan approval is only valid from PLAN_READY, got ${status}`,
+			})
+		},
+	)
+
+	it("confirms the QA outcome at QA_READY and finishes the task", () => {
+		const decision = controller.approveQa(state("QA_READY"))
+
+		expect(decision).toEqual({ type: "stop", status: "DONE", reason: "done" })
+		// The confirmation edge is canonical, so the status the runner writes is reachable.
+		expect(isTaskStatusTransition("QA_READY", "DONE")).toBe(true)
+	})
+
+	it.each(["REVIEW_PASSED", "ANALYSIS", "PLAN_READY", "IMPLEMENTATION", "BLOCKED", "DONE"] as const)(
+		"refuses to confirm the QA outcome from %s",
+		(status) => {
+			expect(controller.approveQa(state(status))).toEqual({
+				type: "invalid",
+				reason: `QA confirmation is only valid from QA_READY, got ${status}`,
 			})
 		},
 	)
@@ -394,12 +506,12 @@ describe("LifecycleController.resolve", () => {
 		],
 		["no parsed implementation unit", validationReport(), 0],
 		["a structural error", validationReport([issue("error", "duplicate-task-id")]), 2],
-	] as const)("keeps ANALYSIS on the architect stage for %s", (_label, report, taskCount) => {
+	] as const)("keeps ANALYSIS on the sublimation stage for %s", (_label, report, taskCount) => {
 		const decision = controller.resolve({ state: state("ANALYSIS"), artifacts: artifacts(taskCount), report })
 
 		expect(decision).toEqual({
 			type: "invalid",
-			reason: "analysis artifacts are not ready; the architect stage must run",
+			reason: "analysis artifacts are not ready; the sublimation stage must run",
 		})
 	})
 
@@ -506,6 +618,35 @@ describe("parseStageOutcome", () => {
 			mode: "reviewer",
 			result: "PASSED",
 			failureKey: null,
+		})
+	})
+
+	it("tolerates trailing punctuation on the result token", () => {
+		expect(parseStageOutcome("reviewer", "Review complete.\nStage Result: PASSED.")).toEqual({
+			mode: "reviewer",
+			result: "PASSED",
+			failureKey: null,
+		})
+		expect(parseStageOutcome("code", "Stage Result: COMPLETED,\n")).toEqual({
+			mode: "code",
+			result: "COMPLETED",
+			failureKey: null,
+		})
+	})
+
+	it("parses a defensive NOT_APPLICABLE report and refuses to route it", () => {
+		const outcome = parseStageOutcome("reviewer", "Stage Result: NOT_APPLICABLE")
+
+		expect(outcome).toEqual({ mode: "reviewer", result: "NOT_APPLICABLE", failureKey: null })
+		expect(
+			controller.transition(state("READY_FOR_REVIEW"), {
+				mode: "reviewer",
+				result: "NOT_APPLICABLE",
+				failureKey: null,
+			}),
+		).toEqual({
+			type: "invalid",
+			reason: "Stage result NOT_APPLICABLE is not a stage outcome; the harness routes from the canonical state",
 		})
 	})
 

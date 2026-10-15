@@ -1370,7 +1370,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			const pushToolResult = vi.fn()
 			const task = makeTask({ taskId: "parent-1" })
 			Object.assign(task, {
-				getTaskMode: vi.fn().mockResolvedValue("architect"),
+				getTaskMode: vi.fn().mockResolvedValue("sublimation"),
 				providerRef: { deref: () => ({ continueTaskLifecycle }) },
 			})
 
@@ -1408,7 +1408,9 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			const continueTaskLifecycle = vi.fn().mockResolvedValue(true)
 			const task = makeTask({ taskId: "parent-1" })
 			Object.assign(task, {
-				getTaskMode: vi.fn().mockResolvedValue("debug"),
+				// The ordinary architect mode is outside the lifecycle vocabulary, so a
+				// staged reply from it must keep the completion ask.
+				getTaskMode: vi.fn().mockResolvedValue("architect"),
 				providerRef: { deref: () => ({ continueTaskLifecycle }) },
 			})
 

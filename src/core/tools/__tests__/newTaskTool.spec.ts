@@ -116,6 +116,8 @@ const taskStateWith = (status: TaskStatus) => ({
 	currentTaskArtifact: null,
 	failureKey: null,
 	failureAttempts: 0,
+	totalFailureAttempts: 0,
+	blockedFrom: null,
 })
 
 // Mock the Cline instance and its methods/properties

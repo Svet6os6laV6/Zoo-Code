@@ -2,7 +2,7 @@
 
 import * as path from "path"
 
-import type { TaskStatus } from "@roo-code/core"
+import { TASK_STATUSES, type TaskStatus } from "@roo-code/core"
 
 import {
 	HARNESS_GATE_STATUSES,
@@ -11,6 +11,7 @@ import {
 	evaluateStageLaunchGate,
 	evaluateStageModeSwitchGate,
 	evaluateUnitMutationGate,
+	isCanonicalReadme,
 	isHarnessGateStatus,
 	isPathInsideDirectory,
 	isStageMode,
@@ -123,6 +124,34 @@ describe("artifact-mutation gate", () => {
 		expect(isPathInsideDirectory(artifactsRoot, artifactsRoot)).toBe(true)
 		expect(isPathInsideDirectory(path.join(artifactsRoot, "README.md"), artifactsRoot)).toBe(true)
 		expect(isPathInsideDirectory(path.resolve(artifactsRoot, "..", "other"), artifactsRoot)).toBe(false)
+	})
+
+	it("rejects the canonical README in every status except ANALYSIS", () => {
+		const readme = path.join(artifactsRoot, "README.md")
+		const protectedStatuses = TASK_STATUSES.filter(
+			(status) => status !== "ANALYSIS" && !HARNESS_GATE_STATUSES.some((gate) => gate === status),
+		)
+
+		for (const status of protectedStatuses) {
+			const decision = evaluateArtifactMutationGate(readme, artifactsRoot, status)
+
+			expect(decision.allowed).toBe(false)
+			if (!decision.allowed) {
+				expect(decision.gate).toBe("artifact-mutation")
+				expect(decision.reason).toContain("canonical task README is harness-owned")
+			}
+		}
+	})
+
+	it("allows the canonical README in ANALYSIS, where the sublimation stage authors it", () => {
+		const readme = path.join(artifactsRoot, "README.md")
+
+		expect(evaluateArtifactMutationGate(readme, artifactsRoot, "ANALYSIS")).toEqual({ allowed: true })
+	})
+
+	it("recognizes the canonical README only at the artifacts root", () => {
+		expect(isCanonicalReadme(path.join(artifactsRoot, "implementation", "README.md"), artifactsRoot)).toBe(false)
+		expect(isCanonicalReadme(path.join(artifactsRoot, "README.md"), artifactsRoot)).toBe(true)
 	})
 })
 

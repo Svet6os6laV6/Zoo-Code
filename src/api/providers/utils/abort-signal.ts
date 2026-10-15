@@ -54,17 +54,6 @@ export function throwIfAborted(signal?: AbortSignal): void {
 }
 
 /**
- * Request options this series passes to the OpenAI SDK call. The SDK's
- * `RequestOptions` declares `signal` as `AbortSignal | null | undefined`,
- * which does not satisfy the builder's base constraint, so the builder is
- * typed with only the options this series sets. The built config is still
- * assignable to the SDK's `RequestOptions`.
- */
-export type OpenAiRequestOptions = {
-	signal?: AbortSignal
-}
-
-/**
  * Whether a failure indicates an aborted request: the caller's signal fired,
  * the SDK raised a native abort error, or the error carries the OpenAI SDK
  * abort error message (exactly "Request was aborted."). The message check

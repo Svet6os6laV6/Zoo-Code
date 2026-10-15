@@ -25,7 +25,7 @@ import {
  * from `REFACTOR`, `REVIEW`, or `QA_READY` too (see `reverifyRequestingStage`).
  */
 export const MODE_STATUSES = {
-	architect: ["ANALYSIS"],
+	sublimation: ["ANALYSIS"],
 	code: ["IMPLEMENTATION", "REFACTOR", "REVIEW", "QA_READY"],
 	refactor: ["READY_FOR_REFACTOR", "REFACTOR"],
 	reviewer: ["READY_FOR_REVIEW", "REVIEW"],
@@ -41,6 +41,19 @@ export const MODE_STATUSES = {
  */
 export const MAX_FAILURE_ATTEMPTS = 3
 
+/**
+ * Maximum number of fix passes the harness starts in one remediation episode,
+ * across every failure key.
+ *
+ * The per-key budget bounds a loop that keeps naming the same finding; this
+ * budget bounds the loop that keeps renaming it. Each fresh key resets the
+ * per-key counter but still advances this one, so the episode cannot spin by
+ * relabelling the same finding. Like the per-key budget, it is cleared by every
+ * decision that advances the lifecycle, so it bounds one remediation episode
+ * and not the whole task history.
+ */
+export const MAX_TOTAL_FAILURE_ATTEMPTS = 6
+
 function invalid(reason: string): LifecycleResult {
 	return { type: "invalid", reason }
 }
@@ -50,8 +63,10 @@ function invalid(reason: string): LifecycleResult {
  *
  * The key is carried over from the README when the stage did not name one, so an
  * unnamed loop is bounded by the same counter. A different key starts a fresh
- * count; the same key advances it. When the pass would exceed
- * {@link MAX_FAILURE_ATTEMPTS} the loop stops instead of running another attempt.
+ * per-key count; the same key advances it. The total counter advances on every
+ * pass regardless of key, so relabelling the same finding cannot reset the
+ * episode budget. When either budget would be exceeded the loop stops instead of
+ * running another attempt.
  */
 function startFixPass(
 	state: TaskState,
@@ -60,17 +75,29 @@ function startFixPass(
 ): LifecycleResult {
 	const key = outcome.failureKey ?? state.failureKey
 	const attempts = state.failureKey === key ? state.failureAttempts + 1 : 1
+	const total = state.totalFailureAttempts + 1
 
 	if (attempts > MAX_FAILURE_ATTEMPTS) {
 		return {
 			type: "stop",
 			status: "BLOCKED",
 			reason: "max-attempts",
-			failure: { key, attempts: MAX_FAILURE_ATTEMPTS },
+			failure: { key, attempts: MAX_FAILURE_ATTEMPTS, total },
+			blockedFrom: state.status,
 		}
 	}
 
-	return { ...decision, failure: { key, attempts } }
+	if (total > MAX_TOTAL_FAILURE_ATTEMPTS) {
+		return {
+			type: "stop",
+			status: "BLOCKED",
+			reason: "max-total-attempts",
+			failure: { key, attempts, total: MAX_TOTAL_FAILURE_ATTEMPTS },
+			blockedFrom: state.status,
+		}
+	}
+
+	return { ...decision, failure: { key, attempts, total } }
 }
 
 function unsupported(mode: StageOutcome["mode"], result: StageResult): LifecycleResult {
@@ -126,7 +153,7 @@ export class LifecycleController {
 
 		// The approval gate is an explicit input, not a setting the controller reads:
 		// packages/core stays pure and the integration owns the user preference. Only
-		// the Architect stage consults it; every other mode ignores the option.
+		// the Sublimation stage consults it; every other mode ignores the option.
 		const decision = this.decide(state, outcome, options.requirePlanApproval ?? true)
 
 		// Only statuses the harness writes itself are validated here.
@@ -154,9 +181,16 @@ export class LifecycleController {
 	 * `BLOCKED` is not routable from a stage outcome, so the harness owns this
 	 * action. The caller has already confirmed the `Unblock Condition` (a user
 	 * signal or a verified external event), which is why the confirmation is an
-	 * explicit argument the controller cannot observe itself. The task returns to
-	 * the implementation queue; `ModeRunner` clears the blocker's failure tracking
-	 * and `TaskScheduler` recomputes the DAG.
+	 * explicit argument the controller cannot observe itself.
+	 *
+	 * The task returns to the status it held before blocking — recorded as
+	 * `Blocked From` when the stop wrote it — so a block taken during review or
+	 * QA resumes into that stage instead of re-running the implementation
+	 * pipeline that already passed. A legacy record with no origin falls back to
+	 * the historical behavior: the implementation queue. A fix pass that was in
+	 * flight resumes as a re-verification by the requesting stage (its marker
+	 * status maps to the stage's entry status), preserving the failure budget so
+	 * a finding that comes back is counted against the same episode.
 	 *
 	 * Pure and side-effect free, like `transition`; `ModeRunner` applies the result.
 	 */
@@ -169,13 +203,61 @@ export class LifecycleController {
 			return invalid("Resume requires the Unblock Condition to be confirmed")
 		}
 
-		if (!isTaskStatusTransition("BLOCKED", "READY_FOR_IMPLEMENTATION")) {
-			return invalid(
-				"Status transition BLOCKED -> READY_FOR_IMPLEMENTATION is not a canonical task status transition",
-			)
+		const origin = state.blockedFrom ?? "READY_FOR_IMPLEMENTATION"
+
+		switch (origin) {
+			case "READY_FOR_IMPLEMENTATION":
+			case "IMPLEMENTATION":
+				if (!isTaskStatusTransition("BLOCKED", "READY_FOR_IMPLEMENTATION")) {
+					return invalid(
+						"Status transition BLOCKED -> READY_FOR_IMPLEMENTATION is not a canonical task status transition",
+					)
+				}
+
+				return { type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" }
+
+			case "ANALYSIS":
+				return this.resumeToStage(state, "ANALYSIS", "sublimation")
+
+			case "READY_FOR_REFACTOR":
+			case "REFACTOR":
+				return this.resumeToStage(state, "READY_FOR_REFACTOR", "refactor")
+
+			case "READY_FOR_REVIEW":
+			case "REVIEW":
+				return this.resumeToStage(state, "READY_FOR_REVIEW", "reviewer")
+
+			case "REVIEW_PASSED":
+			case "QA_READY":
+				return this.resumeToStage(state, "REVIEW_PASSED", "qa")
+
+			// `PLAN_READY`, `DONE`, and `BLOCKED` cannot produce a `BLOCKED` stop
+			// (no stage runs in them), so an origin of one is a corrupted record —
+			// refuse the resume instead of guessing a destination.
+			default:
+				return invalid(`Cannot resume a task blocked from ${origin}`)
+		}
+	}
+
+	/**
+	 * The resume-to-stage half: validate the canonical `BLOCKED` → entry edge and
+	 * re-enter the stage that owns the origin status.
+	 *
+	 * The failure tracking is preserved only for fix-pass origins (`REFACTOR`,
+	 * `REVIEW`, `QA_READY`), where the re-verification continues the same
+	 * remediation budget; a stage-entry origin resumes with a cleared block.
+	 */
+	private resumeToStage(state: TaskState, entryStatus: TaskStatus, mode: LifecycleMode): LifecycleResult {
+		if (!isTaskStatusTransition("BLOCKED", entryStatus)) {
+			return invalid(`Status transition BLOCKED -> ${entryStatus} is not a canonical task status transition`)
 		}
 
-		return { type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" }
+		const fixPassInFlight = state.blockedFrom !== null && state.blockedFrom !== entryStatus
+		const failure = fixPassInFlight
+			? { key: state.failureKey, attempts: state.failureAttempts, total: state.totalFailureAttempts }
+			: undefined
+
+		return { type: "start_mode", status: entryStatus, mode, failure }
 	}
 
 	/**
@@ -202,6 +284,33 @@ export class LifecycleController {
 		}
 
 		return { type: "resume_implementation", status: "READY_FOR_IMPLEMENTATION" }
+	}
+
+	/**
+	 * Confirm the QA outcome of a task stopped at `QA_READY` and finish the task.
+	 *
+	 * `QA_READY` is a user gate like `PLAN_READY`: the QA stage stops there with
+	 * `PENDING` because the recorded evidence needs a human confirmation, and no
+	 * stage outcome may finish the task on the user's behalf. This harness-owned
+	 * action — mirroring `approvePlan` for `PLAN_READY` — is the deterministic way
+	 * to `DONE`. Valid only from `QA_READY`; every other status is refused so the
+	 * caller leaves the task unchanged.
+	 *
+	 * Pure and side-effect free, like `transition`, `resume` and `approvePlan`;
+	 * `ModeRunner` applies the result.
+	 */
+	approveQa(state: TaskState): LifecycleResult {
+		if (state.status !== "QA_READY") {
+			return invalid(`QA confirmation is only valid from QA_READY, got ${state.status}`)
+		}
+
+		// Reuse the same canonical-transition guard `approvePlan` relies on, so the
+		// status the runner writes cannot drift from the README machine.
+		if (!isTaskStatusTransition("QA_READY", "DONE")) {
+			return invalid("Status transition QA_READY -> DONE is not a canonical task status transition")
+		}
+
+		return { type: "stop", status: "DONE", reason: "done" }
 	}
 
 	/**
@@ -244,9 +353,9 @@ export class LifecycleController {
 	/**
 	 * The plan-approval gate decision.
 	 *
-	 * Shared by the Architect stage outcome and the state-only `ANALYSIS` path so
-	 * both routes produce an identical decision: stop at `PLAN_READY` when the gate
-	 * is on, otherwise open the implementation queue directly.
+	 * Shared by the Sublimation stage outcome and the state-only `ANALYSIS` path
+	 * so both routes produce an identical decision: stop at `PLAN_READY` when the
+	 * gate is on, otherwise open the implementation queue directly.
 	 */
 	private planApprovalGate(requirePlanApproval: boolean): LifecycleResult {
 		return requirePlanApproval
@@ -273,11 +382,11 @@ export class LifecycleController {
 
 				const ready = report.valid && !blocking && artifacts.tasks.length > 0
 				if (!ready) {
-					return invalid("analysis artifacts are not ready; the architect stage must run")
+					return invalid("analysis artifacts are not ready; the sublimation stage must run")
 				}
 
 				// The plan is complete, but the gate may require a human approval before
-				// the implementation queue opens — the same stop the Architect stage
+				// the implementation queue opens — the same stop the Sublimation stage
 				// outcome produces, reached here from the state alone.
 				return this.planApprovalGate(requirePlanApproval)
 			}
@@ -318,11 +427,24 @@ export class LifecycleController {
 
 	private decide(state: TaskState, outcome: StageOutcome, requirePlanApproval: boolean): LifecycleResult {
 		if (outcome.result === "BLOCKED") {
-			return { type: "stop", status: "BLOCKED", reason: "blocked" }
+			// Record the origin: the harness-owned resume returns the task there
+			// instead of always re-entering the implementation queue, so stages
+			// that already passed are not re-run after a block.
+			return { type: "stop", status: "BLOCKED", reason: "blocked", blockedFrom: state.status }
+		}
+
+		if (outcome.result === "NOT_APPLICABLE") {
+			// A defensive report, not a stage outcome: the stage observed a status
+			// it does not own and did nothing. Refuse it for every mode so the
+			// caller falls back to the state-only continue, which routes the task
+			// from the canonical state.
+			return invalid(
+				"Stage result NOT_APPLICABLE is not a stage outcome; the harness routes from the canonical state",
+			)
 		}
 
 		switch (outcome.mode) {
-			case "architect":
+			case "sublimation":
 				if (outcome.result !== "COMPLETED") {
 					return unsupported(outcome.mode, outcome.result)
 				}
@@ -354,6 +476,7 @@ export class LifecycleController {
 					: reverifyRequestingStage(state.status, {
 							key: state.failureKey,
 							attempts: state.failureAttempts,
+							total: state.totalFailureAttempts,
 						})
 
 			case "refactor":

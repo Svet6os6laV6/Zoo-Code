@@ -72,7 +72,10 @@ import { CloudService, getRooCodeApiUrl } from "@roo-code/cloud"
 import {
 	LIFECYCLE_MODES,
 	LifecycleError,
+	STAGE_RE_ASK_PREFIX,
+	STAGE_RESULT_MARKER,
 	TaskStateResolver,
+	buildStageReaskInstruction,
 	harnessLogger,
 	type HarnessLogContextInput,
 	type ModeRunResult,
@@ -123,6 +126,7 @@ import { ProviderSettingsManager } from "../config/ProviderSettingsManager"
 import { CustomModesManager } from "../config/CustomModesManager"
 import { Task } from "../task/Task"
 import { HarnessModeRunner } from "../harness/mode-runner"
+import { isStageMode } from "../harness/lifecycle-gate"
 import type { PlanApprovalOutcome } from "../harness/plan-approval"
 
 import { webviewMessageHandler } from "./webviewMessageHandler"
@@ -149,10 +153,6 @@ import { PendingEditOperationStore, type PendingEditOperationInput } from "./Pen
  * https://github.com/microsoft/vscode-webview-ui-toolkit-samples/blob/main/default/weather-webview/src/providers/WeatherViewProvider.ts
  * https://github.com/KumarVariable/vscode-extension-sidebar-html/blob/master/src/customSidebarViewProvider.ts
  */
-
-export type ClineProviderEvents = {
-	clineCreated: [cline: Task]
-}
 
 type DelegatedChildContext = TaskExecutionContext
 
@@ -210,7 +210,7 @@ function isLifecycleMode(mode: string): boolean {
  * Used right after a task is created or restored from history:
  * `continueTaskLifecycle` decides from the canonical state whether the next stage
  * may start without a stage outcome — for example `ANALYSIS` with a complete plan
- * after the Architect stage — so such a task is delegated straight to that stage
+ * after the Sublimation stage — so such a task is delegated straight to that stage
  * instead of spending a model turn re-analysing artifacts the harness can already
  * read. When the lifecycle does not advance, the task starts through the ordinary
  * scheduler path.
@@ -4213,6 +4213,71 @@ export class ClineProvider
 	}
 
 	/**
+	 * The bounded marker re-ask after a stage child completed without its outcome
+	 * line.
+	 *
+	 * A missing marker means the stage report is lost: the state-only continue
+	 * cannot know a finding the stage never named, so before degrading the same
+	 * mode is delegated one cheap child that only re-reports the outcome of the
+	 * already recorded work (see `buildStageReaskInstruction`).
+	 *
+	 * Two bounds, both checked here:
+	 * - the reply must carry no marker at all — an ambiguous report (duplicated
+	 *   markers, an unknown result) is not cured by asking again, it goes straight
+	 *   to the continue fallback;
+	 * - the completed child must not itself be a re-ask (`HistoryItem.task`
+	 *   carries the delegated message), so the recovery is one attempt, never a
+	 *   loop of re-asks.
+	 *
+	 * Returns `true` when the re-ask child was delegated (the completion routing
+	 * is done; its own completion re-enters this transition), `false` when the
+	 * re-ask is not applicable or failed — the caller falls back to the ordinary
+	 * continue.
+	 */
+	private async requestStageOutcomeReask(
+		parentTaskId: string,
+		childHistory: HistoryItem,
+		completionResultSummary: string,
+	): Promise<boolean> {
+		if (completionResultSummary.includes(STAGE_RESULT_MARKER)) {
+			return false
+		}
+
+		if (childHistory.task.startsWith(STAGE_RE_ASK_PREFIX)) {
+			return false
+		}
+
+		const mode = childHistory.mode
+		if (!mode || !isStageMode(mode)) {
+			return false
+		}
+
+		try {
+			await this.assertLifecycleModeConfigured(mode)
+
+			await this.delegateParentAndOpenChildUnlocked({
+				parentTaskId,
+				message: buildStageReaskInstruction({ mode, taskId: parentTaskId }),
+				initialTodos: [],
+				mode,
+			})
+
+			this.log(
+				`[reopenParentFromDelegation] Stage reply from child ${childHistory.id} carried no outcome marker; delegated one ${mode} re-ask child`,
+			)
+
+			return true
+		} catch (error) {
+			this.log(
+				`[reopenParentFromDelegation] Marker re-ask after child ${childHistory.id} failed: ${
+					error instanceof Error ? error.message : String(error)
+				}. Falling back to the state-only continue.`,
+			)
+			return false
+		}
+	}
+
+	/**
 	 * Assert that `mode` exists in the user's configuration before a harness stage
 	 * is delegated to it. Shared by the two runner construction sites so a missing
 	 * mode fails identically on both paths.
@@ -4318,6 +4383,16 @@ export class ClineProvider
 				await vscode.window.showInformationMessage(
 					`Task ${task.taskId} is waiting for plan approval. Review the plan artifacts, ` +
 						`then run "Approve Plan" (zoo-code.approvePlan) to start implementation.`,
+				)
+			}
+
+			// The task stopped so the user can confirm the recorded QA evidence. Same
+			// as the plan gate: surface the harness-owned confirmation action so the
+			// chain does not look stalled; the `QA_READY` write was already applied.
+			if (result?.type === "stopped" && result.status === "QA_READY") {
+				await vscode.window.showInformationMessage(
+					`Task ${task.taskId} is waiting for QA confirmation. Review the recorded evidence in qa.md, ` +
+						`then run "Confirm QA" (zoo-code.approveQa) to finish the task.`,
 				)
 			}
 
@@ -4525,6 +4600,52 @@ export class ClineProvider
 			this.log(`[approvePlanTask] Approval failed: ${error instanceof Error ? error.message : String(error)}`)
 			await vscode.window.showErrorMessage(
 				`Failed to approve the plan for task ${gate.state.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		}
+	}
+
+	/**
+	 * Confirm the QA outcome of the current task when it stopped at `Status: QA_READY`.
+	 *
+	 * `QA_READY` is a user gate like `PLAN_READY`: the QA stage recorded its
+	 * evidence in qa.md and stopped for a human confirmation, so this
+	 * harness-owned action — mirroring `approvePlanTask` for `PLAN_READY` — is
+	 * the deterministic way to `DONE`. The user confirms after reading qa.md;
+	 * `HarnessModeRunner.approveQa` then writes `DONE` and clears the failure
+	 * tracking.
+	 */
+	public async approveQaTask(): Promise<void> {
+		const gate = await this.confirmLifecycleAction({
+			logPrefix: "[approveQaTask]",
+			noTaskMessage: "No active task to confirm.",
+			requiredStatus: "QA_READY",
+			notReadyMessage: (state) =>
+				`Task ${state.taskId} is not waiting for QA confirmation (status: ${state.status}); nothing to confirm.`,
+			confirmMessage: (state) =>
+				`Confirm the QA outcome for task ${state.taskId} and finish the task? ` +
+				`Review the recorded evidence in qa.md first. The harness will write DONE; the lifecycle is complete.`,
+			confirmLabel: "Confirm",
+		})
+		if (!gate) {
+			return
+		}
+
+		try {
+			const result = await this.harnessModeRunner(gate.task.taskId).approveQa(gate.task)
+
+			if (!result) {
+				await vscode.window.showWarningMessage(
+					`Task ${gate.state.taskId} could not be confirmed; the harness left it unchanged.`,
+				)
+			}
+		} catch (error) {
+			this.log(
+				`[approveQaTask] QA confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+			)
+			await vscode.window.showErrorMessage(
+				`Failed to confirm the QA outcome for task ${gate.state.taskId}: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			)
@@ -4883,6 +5004,27 @@ export class ClineProvider
 							completionResultSummary,
 							{ requirePlanApproval },
 						)
+
+						// A stage-child that finished without the outcome marker lost its
+						// report: the state-only continue cannot know a finding the stage
+						// never named. Before degrading, ask the same mode once to re-report
+						// the outcome of the work it already recorded — a cheap child
+						// instead of a whole stage re-run. The bound is the re-ask prefix:
+						// a re-ask child whose reply again lacks the marker is never
+						// re-asked again, it falls through to the continue below.
+						const reaskResult =
+							lifecycleResult === null && isLifecycleMode(childHistory.mode)
+								? await this.requestStageOutcomeReask(
+										parentTaskId,
+										childHistory,
+										completionResultSummary,
+									)
+								: null
+
+						if (reaskResult) {
+							this.cancelledDelegationChildIds.delete(childTaskId)
+							return true
+						}
 
 						// A stage-child that finished without an unambiguous stage marker
 						// cannot be routed from its reply. The canonical state alone may

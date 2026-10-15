@@ -101,6 +101,9 @@ export enum TaskStatus {
 	Interactive = "interactive",
 	Resumable = "resumable",
 	Idle = "idle",
+	// ponytail: knip flags `None` unused in-repo; kept because this package is
+	// npm-published (@roo-code/types) and the member is public API. Drop it only
+	// with a major version bump.
 	None = "none",
 }
 

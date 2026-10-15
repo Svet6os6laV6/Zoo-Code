@@ -77,6 +77,8 @@ function blockedState(overrides: Partial<TaskState> = {}): TaskState {
 		currentTaskArtifact: null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 		...overrides,
 	}
 }

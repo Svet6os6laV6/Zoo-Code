@@ -38,7 +38,9 @@ export type ParkImplementationTaskResult =
 	  }
 
 const FRONTMATTER_STATUS_PATTERN = /^(\s*status\s*:\s*)(.*)$/i
-const SECTION_STATUS_PATTERN = /^(\s*(?:[-*+]\s+)?status\s*:\s*)(.*)$/i
+// Tolerates a tick-wrapped name (``- `Status`: IN_PROGRESS``) the same way the
+// parser does, so the writer rewrites every field the parser can read.
+const SECTION_STATUS_PATTERN = /^(\s*(?:[-*+]\s+)?`?status`?\s*:\s*)(.*)$/i
 const HEADING_PATTERN = /^#{1,6}\s/
 
 /**

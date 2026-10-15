@@ -27,6 +27,8 @@ const state: TaskState = {
 	currentTaskArtifact: null,
 	failureKey: null,
 	failureAttempts: 0,
+	totalFailureAttempts: 0,
+	blockedFrom: null,
 }
 
 describe("HarnessModeRunner", () => {
@@ -45,7 +47,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(state) },
-			controller: { transition, resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn() },
+			controller: { transition, resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn(), approveQa: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -64,7 +66,13 @@ describe("HarnessModeRunner", () => {
 		const resolve = vi.fn()
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve },
-			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn() },
+			controller: {
+				transition: vi.fn(),
+				resume: vi.fn(),
+				resolve: vi.fn(),
+				approvePlan: vi.fn(),
+				approveQa: vi.fn(),
+			},
 			modeRunner: { run: vi.fn() },
 		})
 
@@ -89,6 +97,7 @@ describe("HarnessModeRunner", () => {
 				resume: vi.fn(),
 				resolve: vi.fn(),
 				approvePlan: vi.fn(),
+				approveQa: vi.fn(),
 			},
 			modeRunner: { run: vi.fn().mockResolvedValue({ type: "invalid", reason: "No ready task" }) },
 		})
@@ -169,7 +178,7 @@ describe("HarnessModeRunner", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(blocked) },
-			controller: { transition: vi.fn(), resume, resolve: vi.fn(), approvePlan: vi.fn() },
+			controller: { transition: vi.fn(), resume, resolve: vi.fn(), approvePlan: vi.fn(), approveQa: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -189,6 +198,7 @@ describe("HarnessModeRunner", () => {
 				resume: vi.fn().mockReturnValue({ type: "invalid", reason: "Unblock Condition unconfirmed" }),
 				resolve: vi.fn(),
 				approvePlan: vi.fn(),
+				approveQa: vi.fn(),
 			},
 			modeRunner: { run },
 		})
@@ -342,7 +352,7 @@ describe("HarnessModeRunner.approvePlan", () => {
 		const run = vi.fn().mockResolvedValue(expectedResult)
 		const runner = new HarnessModeRunner(vi.fn(), {
 			stateResolver: { resolve: vi.fn().mockResolvedValue(planReady) },
-			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn(), approvePlan },
+			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn(), approvePlan, approveQa: vi.fn() },
 			modeRunner: { run },
 		})
 
@@ -365,11 +375,50 @@ describe("HarnessModeRunner.approvePlan", () => {
 				resume: vi.fn(),
 				resolve: vi.fn(),
 				approvePlan: vi.fn().mockReturnValue({ type: "invalid", reason: "not PLAN_READY" }),
+				approveQa: vi.fn(),
 			},
 			modeRunner: { run },
 		})
 
 		expect(await runner.approvePlan({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
+		expect(run).not.toHaveBeenCalled()
+	})
+})
+
+describe("HarnessModeRunner.approveQa", () => {
+	it("confirms a QA_READY task and writes DONE", async () => {
+		const qaReady: TaskState = { ...state, status: "QA_READY" }
+		const expectedResult: ModeRunResult = { type: "stopped", status: "DONE", reason: "done" }
+		const approveQa = vi.fn().mockReturnValue({ type: "stop", status: "DONE", reason: "done" })
+		const run = vi.fn().mockResolvedValue(expectedResult)
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue(qaReady) },
+			controller: { transition: vi.fn(), resume: vi.fn(), resolve: vi.fn(), approvePlan: vi.fn(), approveQa },
+			modeRunner: { run },
+		})
+
+		const result = await runner.approveQa({ getTaskContext: vi.fn().mockResolvedValue(context) })
+
+		expect(approveQa).toHaveBeenCalledWith(qaReady)
+		expect(run).toHaveBeenCalledWith(context, qaReady, { type: "stop", status: "DONE", reason: "done" })
+		expect(result).toEqual(expectedResult)
+	})
+
+	it("returns null when the task is not at QA_READY", async () => {
+		const run = vi.fn()
+		const runner = new HarnessModeRunner(vi.fn(), {
+			stateResolver: { resolve: vi.fn().mockResolvedValue({ ...state, status: "REVIEW_PASSED" }) },
+			controller: {
+				transition: vi.fn(),
+				resume: vi.fn(),
+				resolve: vi.fn(),
+				approvePlan: vi.fn(),
+				approveQa: vi.fn().mockReturnValue({ type: "invalid", reason: "not QA_READY" }),
+			},
+			modeRunner: { run },
+		})
+
+		expect(await runner.approveQa({ getTaskContext: vi.fn().mockResolvedValue(context) })).toBeNull()
 		expect(run).not.toHaveBeenCalled()
 	})
 })

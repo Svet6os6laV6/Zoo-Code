@@ -26,7 +26,7 @@ import {
  * pinning it to one file.
  */
 export const STAGE_ARTIFACTS = {
-	architect: ["README.md"],
+	sublimation: ["README.md"],
 	code: ["README.md"],
 	refactor: ["README.md", "implementation/"],
 	reviewer: ["README.md", "implementation/", "handoff.md"],
@@ -44,11 +44,12 @@ export const STAGE_ARTIFACTS = {
  * deadlock the DAG, so the distinction is stated where the stage is started.
  */
 export const STAGE_DIRECTIVES = {
-	architect: "Produce or update the implementation plan artifacts.",
+	sublimation: "Produce or update the implementation plan artifacts.",
 	code: "Implement the assigned implementation unit, or the reported fix. Report RESCHEDULE_REQUIRED when the unit cannot proceed until another unit in implementation/ is done: record the dependency and the progress notes in the unit artifact first. Report BLOCKED only for obstacles the harness cannot remove itself (a user decision, missing credentials, an unavailable external service).",
 	refactor: "Restructure the completed implementation without changing behaviour.",
-	reviewer: "Review the implementation against the requirements and record findings.",
-	qa: "Verify the reviewed work against the acceptance criteria and record evidence in qa.md, including three ready-to-use commit message variants describing the task's changes.",
+	reviewer:
+		"Review the implementation against the requirements and record findings. Append every recommendation you leave open (Status: OPEN) to the workspace-level backlog .roo/backlog.md: one line per finding with the task id, the recommendation id, and what is left to do, so open recommendations survive the task folder.",
+	qa: "Verify the reviewed work against the acceptance criteria and record evidence in qa.md: for every result, the exact command you ran plus a link to the CI run that backs it (or the pasted test-summary output when no run exists) — never a bare tally. Include three ready-to-use commit message variants describing the task's changes.",
 } as const satisfies Record<LifecycleMode, string>
 
 export type StageInstructionInput = {
@@ -58,6 +59,41 @@ export type StageInstructionInput = {
 	readonly assignedArtifact: string | null
 	/** Failure tracking when the controller is starting a fix pass. */
 	readonly failure?: FailureTracking
+}
+
+/**
+ * The prefix that marks a stage child as a marker re-ask rather than an ordinary
+ * stage start, so the caller can bound the recovery: a re-ask child whose reply
+ * again lacks the marker is never re-asked again — the caller falls back to the
+ * state-only continue or the legacy resume instead.
+ */
+export const STAGE_RE_ASK_PREFIX = "Re-report the stage outcome:"
+
+export type StageReaskInput = {
+	readonly mode: LifecycleMode
+	readonly taskId: string
+}
+
+/**
+ * Compose the bounded recovery instruction for a stage reply that lacked the
+ * outcome marker.
+ *
+ * The re-ask is a pointer like any stage instruction: it never replays the stage
+ * work, only asks the same mode to state the semantic outcome of the work
+ * already recorded in the stage artifacts as the one marker line the parser
+ * reads. The prefix lets the caller recognize its own re-ask and stop there.
+ */
+export function buildStageReaskInstruction(input: StageReaskInput): string {
+	const { mode, taskId } = input
+
+	return [
+		`${STAGE_RE_ASK_PREFIX} run the ${mode} stage re-report for ${taskId}.`,
+		`The previous ${mode} stage reply did not report its outcome with the required marker line.`,
+		"Read the stage artifacts to recall the work that was already done; do not redo it.",
+		`Report the semantic outcome of that work as exactly one '${STAGE_RESULT_MARKER} <RESULT>' line`,
+		`(and one '${STAGE_FAILURE_KEY_MARKER} <key>' line when the finding is still present).`,
+		"Do not select the next mode or lifecycle status.",
+	].join(" ")
 }
 
 /**

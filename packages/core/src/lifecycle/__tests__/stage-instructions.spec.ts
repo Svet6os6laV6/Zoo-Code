@@ -1,5 +1,11 @@
 import { LIFECYCLE_MODES, STAGE_FAILURE_KEY_MARKER, STAGE_RESULT_MARKER } from "../index.js"
-import { STAGE_ARTIFACTS, STAGE_DIRECTIVES, buildStageInstruction } from "../stage-instructions.js"
+import {
+	STAGE_ARTIFACTS,
+	STAGE_DIRECTIVES,
+	STAGE_RE_ASK_PREFIX,
+	buildStageInstruction,
+	buildStageReaskInstruction,
+} from "../stage-instructions.js"
 
 describe("buildStageInstruction", () => {
 	it("covers every lifecycle mode with artifacts and a directive", () => {
@@ -36,7 +42,7 @@ describe("buildStageInstruction", () => {
 			mode: "code",
 			taskId: "SITESUP-1116",
 			assignedArtifact: null,
-			failure: { key: "auth-token-expiry", attempts: 2 },
+			failure: { key: "auth-token-expiry", attempts: 2, total: 2 },
 		})
 
 		expect(instruction).toContain("fix pass 2")
@@ -50,14 +56,47 @@ describe("buildStageInstruction", () => {
 		expect(STAGE_DIRECTIVES.qa).toContain("commit message")
 	})
 
+	it("requires machine-checkable QA evidence, not a bare tally", () => {
+		// The QA record must be re-checkable after the fact: commands plus a CI run
+		// link (or pasted summary) name what ran and where, so "passed" is a claim
+		// a reader can follow.
+		expect(STAGE_DIRECTIVES.qa).toContain("exact command")
+		expect(STAGE_DIRECTIVES.qa).toContain("CI run")
+	})
+
+	it("asks the reviewer to carry open recommendations into the workspace backlog", () => {
+		// The task folder is archiveable; an open REC that lives only inside
+		// review.md dies with it. The backlog line is the durable home.
+		expect(STAGE_DIRECTIVES.reviewer).toContain("Status: OPEN")
+		expect(STAGE_DIRECTIVES.reviewer).toContain(".roo/backlog.md")
+	})
+
 	it("describes an unnamed fix pass without inventing a key", () => {
 		const instruction = buildStageInstruction({
 			mode: "code",
 			taskId: "SITESUP-1116",
 			assignedArtifact: null,
-			failure: { key: null, attempts: 1 },
+			failure: { key: null, attempts: 1, total: 1 },
 		})
 
 		expect(instruction).toContain("an unnamed finding")
+	})
+})
+
+describe("buildStageReaskInstruction", () => {
+	it("starts with the prefix the provider uses to bound the recovery to one attempt", () => {
+		const instruction = buildStageReaskInstruction({ mode: "reviewer", taskId: "SITESUP-1116" })
+
+		expect(instruction.startsWith(STAGE_RE_ASK_PREFIX)).toBe(true)
+	})
+
+	it("asks the same mode to re-report without redoing the work or routing", () => {
+		const instruction = buildStageReaskInstruction({ mode: "reviewer", taskId: "SITESUP-1116" })
+
+		expect(instruction).toContain("reviewer stage re-report for SITESUP-1116")
+		expect(instruction).toContain("do not redo it")
+		expect(instruction).toContain(`'${STAGE_RESULT_MARKER} <RESULT>'`)
+		expect(instruction).toContain(`'${STAGE_FAILURE_KEY_MARKER} <key>'`)
+		expect(instruction).toContain("Do not select the next mode or lifecycle status")
 	})
 })

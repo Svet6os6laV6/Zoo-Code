@@ -70,6 +70,32 @@ Status: DONE
 		})
 	})
 
+	it("parses tick-wrapped relationship fields (`Depends on`)", () => {
+		// Regression: the Architect writes field names as inline code
+		// (``- `Depends on`: T01, T02, T04.``). When the ticks were not
+		// unwrapped, every dependency list parsed empty, the DAG went flat,
+		// and a unit reporting RESCHEDULE_REQUIRED was reassigned forever.
+		const parsed = parseImplementationTask(
+			"T03-turbo-game-loop.md",
+			"/workspace/.roo/tasks/fix-22/implementation/T03-turbo-game-loop.md",
+			`# T03 — Игровой цикл
+
+## Status
+
+Status: TODO
+
+## Relationships
+
+- \`Depends on\`: T01, T02, T04.
+- \`Integrates with\`: всеми единицами; join-точка плана.
+- \`Consumes\`: \`ConsumeTurboCharge\`/\`Direction\` (T01), \`EventTurbo\` (T02).
+`,
+		)
+
+		expect(parsed.dependsOn).toEqual(["T01", "T02", "T04"])
+		expect(parsed.consumes).toContain("ConsumeTurboCharge")
+	})
+
 	it("parses YAML frontmatter", () => {
 		const parsed = parseImplementationTask(
 			"T03-stale-reconciler.md",

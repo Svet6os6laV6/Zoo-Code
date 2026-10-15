@@ -22,6 +22,9 @@ export function getMinComponentLines(): number {
 
 /**
  * Set the minimum number of lines for a component (for testing)
+ *
+ * ponytail: knip flags this unused because its only callers live in
+ * `__tests__/`, which knip's `project` glob excludes. Not dead — keep.
  */
 export function setMinComponentLines(value: number): void {
 	currentMinComponentLines = value

@@ -60,6 +60,8 @@ function state(overrides: Partial<TaskState> = {}): TaskState {
 		currentTaskArtifact: null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 		...overrides,
 	}
 }
@@ -96,6 +98,8 @@ Task: SITESUP-1116
 Status: IMPLEMENTATION
 Failure Key: NONE
 Failure Attempts: 0
+Total Failure Attempts: 0
+Blocked From: NONE
 Current Task: implementation/T02-worker.md
 Next Step: Implement T02 (implementation/T02-worker.md).
 `)
@@ -193,6 +197,8 @@ Current Task: implementation/T02-worker.md
 Next Step: Implement T02 (implementation/T02-worker.md).
 Failure Key: NONE
 Failure Attempts: 0
+Total Failure Attempts: 0
+Blocked From: NONE
 `)
 	})
 

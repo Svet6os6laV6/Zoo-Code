@@ -4602,6 +4602,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						currentTaskArtifact: null,
 						failureKey: null,
 						failureAttempts: 0,
+						totalFailureAttempts: 0,
+						blockedFrom: null,
 					}
 				}
 

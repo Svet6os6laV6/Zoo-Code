@@ -7,6 +7,7 @@ import type { Task } from "../../task/Task"
 const continueHarness = vi.hoisted(() => vi.fn())
 const runHarness = vi.hoisted(() => vi.fn())
 const approveHarness = vi.hoisted(() => vi.fn())
+const approveQaHarness = vi.hoisted(() => vi.fn())
 const resolveState = vi.hoisted(() => vi.fn())
 const showInformationMessage = vi.hoisted(() => vi.fn())
 const showWarningMessage = vi.hoisted(() => vi.fn())
@@ -51,6 +52,7 @@ vi.mock("../../harness/mode-runner", () => ({
 		continue = continueHarness
 		resume = vi.fn()
 		approvePlan = approveHarness
+		approveQa = approveQaHarness
 	},
 }))
 
@@ -92,7 +94,7 @@ function makeProvider(overrides: { mode?: string; history?: Record<string, unkno
 	const task = {
 		taskId: "SITESUP-1119",
 		parentTaskId: overrides.parentTaskId,
-		getTaskMode: vi.fn().mockResolvedValue(overrides.mode ?? "architect"),
+		getTaskMode: vi.fn().mockResolvedValue(overrides.mode ?? "sublimation"),
 		getTaskContext: vi.fn().mockResolvedValue({
 			taskId: "SITESUP-1119",
 			branch: "feature/SITESUP-1119",
@@ -148,19 +150,19 @@ describe("ClineProvider.continueTaskLifecycle", () => {
 	})
 
 	it("routes a reported stage result through the stage-outcome path", async () => {
-		const { provider, task } = makeProvider({ mode: "architect" })
+		const { provider, task } = makeProvider({ mode: "sublimation" })
 
 		expect(
 			await provider.continueTaskLifecycle(task as unknown as Task, "Plan ready.\nStage Result: COMPLETED"),
 		).toBe(true)
-		expect(runHarness).toHaveBeenCalledWith(task, "architect", "Plan ready.\nStage Result: COMPLETED", {
+		expect(runHarness).toHaveBeenCalledWith(task, "sublimation", "Plan ready.\nStage Result: COMPLETED", {
 			requirePlanApproval: true,
 		})
 		expect(continueHarness).not.toHaveBeenCalled()
 	})
 
 	it("tells the user the plan awaits approval when the chain stops at PLAN_READY", async () => {
-		const { provider, task } = makeProvider({ mode: "architect" })
+		const { provider, task } = makeProvider({ mode: "sublimation" })
 		runHarness.mockResolvedValue({ type: "stopped", status: "PLAN_READY", reason: "plan-approval" })
 
 		// A `stopped` result is not an advance: the caller keeps its ordinary path.
@@ -360,6 +362,8 @@ function planReadyState(status = "PLAN_READY") {
 		currentTaskArtifact: null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 	}
 }
 
@@ -430,6 +434,68 @@ describe("ClineProvider.approvePlanTask", () => {
 
 		expect(showErrorMessage).toHaveBeenCalledWith("Could not read the task lifecycle state.")
 		expect(approveHarness).not.toHaveBeenCalled()
+	})
+})
+
+describe("ClineProvider.approveQaTask", () => {
+	beforeEach(() => {
+		vi.clearAllMocks()
+		approveQaHarness.mockResolvedValue({ type: "stopped", status: "DONE", reason: "done" })
+	})
+
+	it("does nothing when there is no current task", async () => {
+		const { provider } = makeProvider()
+		provider.getCurrentTask.mockReturnValue(undefined)
+
+		await provider.approveQaTask()
+
+		expect(showInformationMessage).toHaveBeenCalledWith("No active task to confirm.")
+		expect(approveQaHarness).not.toHaveBeenCalled()
+	})
+
+	it("does not prompt when the task is not waiting for QA confirmation", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState("IMPLEMENTATION"))
+
+		await provider.approveQaTask()
+
+		expect(showInformationMessage).toHaveBeenCalledWith(
+			expect.stringContaining("is not waiting for QA confirmation"),
+		)
+		expect(showWarningMessage).not.toHaveBeenCalled()
+		expect(approveQaHarness).not.toHaveBeenCalled()
+	})
+
+	it("leaves the task unchanged when the user does not confirm", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState("QA_READY"))
+		showWarningMessage.mockResolvedValue(undefined)
+
+		await provider.approveQaTask()
+
+		expect(showWarningMessage).toHaveBeenCalledWith(expect.any(String), { modal: true }, "Confirm")
+		expect(approveQaHarness).not.toHaveBeenCalled()
+	})
+
+	it("confirms the QA outcome after the user confirms", async () => {
+		const { provider, task } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState("QA_READY"))
+		showWarningMessage.mockResolvedValue("Confirm")
+
+		await provider.approveQaTask()
+
+		expect(approveQaHarness).toHaveBeenCalledWith(task)
+	})
+
+	it("warns when the harness cannot confirm the task", async () => {
+		const { provider } = makeProvider()
+		resolveState.mockResolvedValue(planReadyState("QA_READY"))
+		showWarningMessage.mockResolvedValue("Confirm")
+		approveQaHarness.mockResolvedValue(null)
+
+		await provider.approveQaTask()
+
+		expect(showWarningMessage).toHaveBeenCalledWith(expect.stringContaining("could not be confirmed"))
 	})
 })
 

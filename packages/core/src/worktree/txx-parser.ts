@@ -119,7 +119,9 @@ function readSection(content: string, heading: string): string | null {
  * Read the first `Name: value` line of a section.
  *
  * Relationship fields are written as list items (`- Depends on: T01`), so a
- * leading list marker is stripped before matching.
+ * leading list marker is stripped before matching. Models also frequently wrap
+ * the field name in inline code ticks (`` - `Depends on`: T01 ``); the ticks
+ * are formatting, not content, so a tick-wrapped name is unwrapped too.
  */
 function readField(section: string | null, name: string): string | null {
 	if (!section) {
@@ -129,7 +131,12 @@ function readField(section: string | null, name: string): string | null {
 	const prefix = `${name}:`.toLowerCase()
 	const line = section
 		.split(/\r?\n/)
-		.map((candidate) => candidate.trim().replace(/^[-*+]\s+/, ""))
+		.map((candidate) =>
+			candidate
+				.trim()
+				.replace(/^[-*+]\s+/, "")
+				.replace(/^`([^`]*)`(?=:)/, "$1"),
+		)
 		.find((candidate) => candidate.toLowerCase().startsWith(prefix))
 
 	if (!line) {

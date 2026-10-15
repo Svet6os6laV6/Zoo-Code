@@ -29,6 +29,8 @@ Next Step: Implement T02.
 			currentTaskArtifact: path.join(taskContext.taskRoot, "implementation", "T02-worker-heartbeat.md"),
 			failureKey: null,
 			failureAttempts: 0,
+			totalFailureAttempts: 0,
+			blockedFrom: null,
 		})
 	})
 
@@ -79,6 +81,8 @@ Failure Attempts: many
 			currentTaskArtifact: null,
 			failureKey: null,
 			failureAttempts: 0,
+			totalFailureAttempts: 0,
+			blockedFrom: null,
 		})
 	})
 
@@ -124,6 +128,8 @@ Current Task: NONE
 			currentTaskArtifact: null,
 			failureKey: null,
 			failureAttempts: 0,
+			totalFailureAttempts: 0,
+			blockedFrom: null,
 		})
 	})
 
@@ -135,6 +141,8 @@ Current Task: NONE
 			currentTaskArtifact: null,
 			failureKey: null,
 			failureAttempts: 0,
+			totalFailureAttempts: 0,
+			blockedFrom: null,
 		})
 	})
 
@@ -155,6 +163,12 @@ Current Task: NONE
 		["REVIEW", "READY_FOR_REVIEW"],
 		["REFACTOR", "READY_FOR_REFACTOR"],
 		["QA_READY", "REVIEW_PASSED"],
+		// The harness-owned QA confirmation (`approveQa`) finishes the task.
+		["QA_READY", "DONE"],
+		// The scheduler writes this when the queue opens on a drained DAG (every
+		// unit done, e.g. a legacy record resumed): `assignNext` finds no ready
+		// unit and Refactor starts instead.
+		["READY_FOR_IMPLEMENTATION", "READY_FOR_REFACTOR"],
 	] as const)("accepts the %s -> %s edge the lifecycle stages rely on", (current, next) => {
 		expect(TaskStateResolver.transition(current, next)).toBe(next)
 		expect(isTaskStatusTransition(current, next)).toBe(true)

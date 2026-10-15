@@ -50,6 +50,7 @@ export const commandIds = [
 	"resumeBlockedTask",
 	"continueTaskLifecycle",
 	"approvePlan",
+	"approveQa",
 
 	"openHarnessLogViewer",
 	"registerHarnessLogsMcp",

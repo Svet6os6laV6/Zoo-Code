@@ -26,6 +26,12 @@ export const NO_FAILURE_KEY = "NONE"
 /** Canonical value declaring that no fix pass has been spent on a failure. */
 export const NO_FAILURE_ATTEMPTS = "0"
 
+/** Canonical value declaring that no total fix passes have been spent. */
+export const NO_TOTAL_FAILURE_ATTEMPTS = "0"
+
+/** Canonical value declaring that a `BLOCKED` record has no origin status. */
+export const NO_BLOCKED_FROM = "NONE"
+
 /**
  * Canonical fields in the order a missing field is inserted. The `Status` line
  * is the anchor: a README without it is left untouched, because mutating an
@@ -37,6 +43,8 @@ export const CANONICAL_README_FIELDS = [
 	"Next Step",
 	"Failure Key",
 	"Failure Attempts",
+	"Total Failure Attempts",
+	"Blocked From",
 ] as const
 
 export type CanonicalReadmeField = (typeof CANONICAL_README_FIELDS)[number]
@@ -51,6 +59,8 @@ export type CanonicalReadmeSnapshot = {
 	readonly nextStep: string | null
 	readonly failureKey: string | null
 	readonly failureAttempts: string | null
+	readonly totalFailureAttempts: string | null
+	readonly blockedFrom: string | null
 }
 
 /** The file capabilities both the scheduler and the lifecycle runner need. */
@@ -103,6 +113,8 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
 		nextStep: readField(lines, "Next Step"),
 		failureKey: readField(lines, "Failure Key"),
 		failureAttempts: readField(lines, "Failure Attempts"),
+		totalFailureAttempts: readField(lines, "Total Failure Attempts"),
+		blockedFrom: readField(lines, "Blocked From"),
 	}
 }
 
@@ -114,9 +126,28 @@ export function readCanonicalFields(readme: string): CanonicalReadmeSnapshot {
  * emitted even when the README has no failure fields yet, so the protocol v2
  * canonical block is always complete: a decision that advances past a failure
  * writes the fields back instead of leaving the block malformed.
+ *
+ * The total counter shares the block's lifecycle: every decision that advances
+ * the lifecycle clears it together with the key and per-key attempts, so the
+ * global budget bounds one remediation episode, not the whole task history.
  */
 export function clearedFailureFields(): CanonicalReadmeFields {
-	return { "Failure Key": NO_FAILURE_KEY, "Failure Attempts": NO_FAILURE_ATTEMPTS }
+	return {
+		"Failure Key": NO_FAILURE_KEY,
+		"Failure Attempts": NO_FAILURE_ATTEMPTS,
+		"Total Failure Attempts": NO_TOTAL_FAILURE_ATTEMPTS,
+	}
+}
+
+/**
+ * The fields that clear a recorded `BLOCKED` origin.
+ *
+ * Every canonical write that leaves `BLOCKED` — a resume to any origin status or
+ * an implementation assignment — clears the origin so a future block records a
+ * fresh one instead of resuming to a stale status.
+ */
+export function clearedBlockedFromFields(): CanonicalReadmeFields {
+	return { "Blocked From": NO_BLOCKED_FROM }
 }
 
 /**

@@ -99,35 +99,6 @@ export function resolveToolAlias(toolName: string): string {
 }
 
 /**
- * Applies tool alias resolution to a set of allowed tools.
- * Resolves any aliases to their canonical tool names.
- *
- * @param allowedTools - Set of tools that may contain aliases
- * @returns Set with aliases resolved to canonical names
- */
-export function applyToolAliases(allowedTools: Set<string>): Set<string> {
-	const result = new Set<string>()
-
-	for (const tool of allowedTools) {
-		// Resolve alias to canonical name
-		result.add(resolveToolAlias(tool))
-	}
-
-	return result
-}
-
-/**
- * Gets all tools in an alias group (including the canonical tool).
- * Uses pre-computed ALIAS_GROUPS map for O(1) lookup.
- *
- * @param toolName - Any tool name in the alias group
- * @returns Array of all tool names in the alias group, or just the tool if not aliased
- */
-export function getToolAliasGroup(toolName: string): readonly string[] {
-	return ALIAS_GROUPS.get(toolName) ?? [toolName]
-}
-
-/**
  * Apply model-specific tool customization to a set of allowed tools.
  *
  * This function filters tools based on model configuration:
@@ -362,94 +333,6 @@ function hasAnyMcpResources(mcpHub: McpHub, allowedServers?: string[]): boolean 
 		servers = servers.filter((server) => allowSet.has(server.name))
 	}
 	return servers.some((server) => server.resources && server.resources.length > 0)
-}
-
-/**
- * Checks if a specific tool is allowed in the current mode.
- * This is useful for dynamically filtering system prompt content.
- *
- * @param toolName - Name of the tool to check
- * @param mode - Current mode slug
- * @param customModes - Custom mode configurations
- * @param experiments - Experiment flags
- * @param codeIndexManager - Code index manager for codebase_search feature check
- * @param settings - Additional settings for tool filtering
- * @returns true if the tool is allowed in the mode, false otherwise
- */
-export function isToolAllowedInMode(
-	toolName: ToolName,
-	mode: string | undefined,
-	customModes: ModeConfig[] | undefined,
-	experiments: Record<string, boolean> | undefined,
-	codeIndexManager?: CodeIndexManager,
-	settings?: Record<string, any>,
-): boolean {
-	const modeSlug = mode ?? defaultModeSlug
-
-	// Check if it's an always-available tool
-	if (ALWAYS_AVAILABLE_TOOLS.includes(toolName)) {
-		// But still check for conditional exclusions
-		if (toolName === "codebase_search") {
-			return !!(
-				codeIndexManager &&
-				codeIndexManager.isFeatureEnabled &&
-				codeIndexManager.isFeatureConfigured &&
-				codeIndexManager.isInitialized
-			)
-		}
-		if (toolName === "update_todo_list") {
-			return settings?.todoListEnabled !== false
-		}
-		if (toolName === "generate_image") {
-			return experiments?.imageGeneration === true
-		}
-		if (toolName === "run_slash_command") {
-			return experiments?.runSlashCommand === true
-		}
-		return true
-	}
-
-	// Check if the tool is allowed by the mode's groups
-	// Resolve to canonical name and check that single value
-	const canonicalTool = resolveToolAlias(toolName)
-	return isToolAllowedForMode(
-		canonicalTool as ToolName,
-		modeSlug,
-		customModes ?? [],
-		undefined,
-		undefined,
-		experiments ?? {},
-	)
-}
-
-/**
- * Gets the list of available tools from a specific tool group for the current mode.
- * This is useful for dynamically building system prompt content based on available tools.
- *
- * @param groupName - Name of the tool group to check
- * @param mode - Current mode slug
- * @param customModes - Custom mode configurations
- * @param experiments - Experiment flags
- * @param codeIndexManager - Code index manager for codebase_search feature check
- * @param settings - Additional settings for tool filtering
- * @returns Array of tool names that are available from the group
- */
-export function getAvailableToolsInGroup(
-	groupName: ToolGroup,
-	mode: string | undefined,
-	customModes: ModeConfig[] | undefined,
-	experiments: Record<string, boolean> | undefined,
-	codeIndexManager?: CodeIndexManager,
-	settings?: Record<string, any>,
-): ToolName[] {
-	const toolGroup = TOOL_GROUPS[groupName]
-	if (!toolGroup) {
-		return []
-	}
-
-	return toolGroup.tools.filter((tool) =>
-		isToolAllowedInMode(tool as ToolName, mode, customModes, experiments, codeIndexManager, settings),
-	) as ToolName[]
 }
 
 /**

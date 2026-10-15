@@ -34,6 +34,8 @@ Next Step: Implement T02.
 				currentTaskArtifact: path.join(taskRoot, "implementation", "T02-worker-heartbeat.md"),
 				failureKey: null,
 				failureAttempts: 0,
+				totalFailureAttempts: 0,
+				blockedFrom: null,
 			})
 		} finally {
 			await fs.rm(workspacePath, { recursive: true, force: true })

@@ -24,6 +24,8 @@ function state(
 		currentTaskArtifact: currentTask ? path.join(implementation, `${currentTask}-unit.md`) : null,
 		failureKey: null,
 		failureAttempts: 0,
+		totalFailureAttempts: 0,
+		blockedFrom: null,
 		...overrides,
 	}
 }
@@ -254,7 +256,7 @@ describe("ModeRunner", () => {
 	it("does not touch the README when the decision re-writes the current status", async () => {
 		const fileSystem = createInMemoryFileSystem({
 			[readmePath]:
-				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\nNext Step: Confirm the QA outcome to finish the task.\nFailure Key: NONE\nFailure Attempts: 0\n",
+				"Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\nNext Step: Confirm the QA outcome to finish the task.\nFailure Key: NONE\nFailure Attempts: 0\nTotal Failure Attempts: 0\nBlocked From: NONE\n",
 		})
 		const writeFile = vi.spyOn(fileSystem, "writeFile")
 		const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem)
@@ -360,13 +362,34 @@ describe("ModeRunner", () => {
 			type: "start_mode",
 			status: "REVIEW",
 			mode: "code",
-			failure: { key: "auth-token-expiry", attempts: 2 },
+			failure: { key: "auth-token-expiry", attempts: 2, total: 2 },
 		})
 
 		const readme = fileSystem.files.get(readmePath) ?? ""
 		expect(readme).toContain("Status: REVIEW")
 		expect(readme).toContain("Failure Key: auth-token-expiry")
 		expect(readme).toContain("Failure Attempts: 2")
+		expect(readme).toContain("Total Failure Attempts: 2")
+		// The pointer names the fix pass, so the ambiguous REVIEW marker stays
+		// human-readable: the README says what is running, not only the marker.
+		expect(readme).toContain("Next Step: Run the code fix pass for auth-token-expiry (attempt 2).")
+	})
+
+	it("points a re-verification at the fix it must verify", async () => {
+		const fileSystem = createInMemoryFileSystem({
+			[readmePath]: "Protocol Version: 2\nTask: SITESUP-1116\nStatus: REVIEW\nCurrent Task: NONE\n",
+		})
+		const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem)
+
+		await runner.run(context, state("REVIEW"), {
+			type: "start_mode",
+			status: "READY_FOR_REVIEW",
+			mode: "reviewer",
+			failure: { key: "auth-token-expiry", attempts: 2, total: 2 },
+		})
+
+		const readme = fileSystem.files.get(readmePath) ?? ""
+		expect(readme).toContain("Next Step: Re-run the reviewer stage to verify the fix for auth-token-expiry.")
 	})
 
 	it("clears the failure block when a stage advances", async () => {
@@ -386,6 +409,7 @@ describe("ModeRunner", () => {
 		expect(readme).toContain("Status: READY_FOR_REVIEW")
 		expect(readme).toContain("Failure Key: NONE")
 		expect(readme).toContain("Failure Attempts: 0")
+		expect(readme).toContain("Total Failure Attempts: 0")
 	})
 
 	it("points Code at the assigned implementation unit", async () => {
@@ -776,7 +800,7 @@ describe("ModeRunner", () => {
 		it("does not journal an idempotent write that changes no field", async () => {
 			const fileSystem = createInMemoryFileSystem({
 				[readmePath]:
-					"Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\nNext Step: Confirm the QA outcome to finish the task.\nFailure Key: NONE\nFailure Attempts: 0\n",
+					"Protocol Version: 2\nTask: SITESUP-1116\nStatus: QA_READY\nCurrent Task: NONE\nNext Step: Confirm the QA outcome to finish the task.\nFailure Key: NONE\nFailure Attempts: 0\nTotal Failure Attempts: 0\nBlocked From: NONE\n",
 			})
 			const logger = new RecordingHarnessLogger()
 			const runner = new ModeRunner(vi.fn(), new TaskScheduler(fileSystem), fileSystem, logger)

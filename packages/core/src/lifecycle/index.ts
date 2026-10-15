@@ -1,4 +1,9 @@
-export { LifecycleController, MAX_FAILURE_ATTEMPTS, MODE_STATUSES } from "./lifecycle-controller.js"
+export {
+	LifecycleController,
+	MAX_FAILURE_ATTEMPTS,
+	MAX_TOTAL_FAILURE_ATTEMPTS,
+	MODE_STATUSES,
+} from "./lifecycle-controller.js"
 export { ModeRunner } from "./mode-runner.js"
 export {
 	LIFECYCLE_MODES,
@@ -18,6 +23,9 @@ export {
 export {
 	STAGE_ARTIFACTS,
 	STAGE_DIRECTIVES,
+	STAGE_RE_ASK_PREFIX,
 	buildStageInstruction,
+	buildStageReaskInstruction,
 	type StageInstructionInput,
+	type StageReaskInput,
 } from "./stage-instructions.js"
