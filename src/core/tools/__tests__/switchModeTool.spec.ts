@@ -59,9 +59,9 @@ describe("SwitchModeTool", () => {
 		mockGetState = vi.fn().mockResolvedValue({ mode: "code", customModes: [] })
 
 		mockTask = {
+			getTaskMode: vi.fn().mockResolvedValue("code"),
 			consecutiveMistakeCount: 0,
 			recordToolError: vi.fn(),
-			getTaskMode: vi.fn().mockResolvedValue("code"),
 			didToolFailInCurrentTurn: false,
 			sayAndCreateMissingParamError: vi.fn().mockResolvedValue("Missing parameter error"),
 			ask: vi.fn().mockResolvedValue({}),
@@ -81,6 +81,7 @@ describe("SwitchModeTool", () => {
 			askApproval: vi.fn().mockResolvedValue(true),
 			handleError: vi.fn(),
 			pushToolResult: vi.fn(),
+			toolCallId: "test-tool-call-id",
 		}
 	})
 
@@ -138,8 +139,8 @@ describe("SwitchModeTool", () => {
 
 	// ===== Already in mode tests =====
 
-	it("should handle switching to the same mode", async () => {
-		// Current mode is "code" (from mockGetState)
+	it("should reject switching to the task's current mode when provider state differs", async () => {
+		mockGetState.mockResolvedValue({ mode: "orchestrator", customModes: [] })
 		const block = createBlock({ mode_slug: "code", reason: "already here" })
 
 		await switchModeTool.handle(mockTask, block, mockCallbacks)
@@ -147,6 +148,7 @@ describe("SwitchModeTool", () => {
 		expect(mockTask.recordToolError).toHaveBeenCalledWith("switch_mode")
 		expect(mockTask.didToolFailInCurrentTurn).toBe(true)
 		expect(mockCallbacks.pushToolResult).toHaveBeenCalledWith("Already in Code mode.")
+		expect(mockTask.getTaskMode).toHaveBeenCalledOnce()
 		// Should NOT ask approval or switch
 		expect(mockCallbacks.askApproval).not.toHaveBeenCalled()
 		expect(mockHandleModeSwitch).not.toHaveBeenCalled()
@@ -363,9 +365,9 @@ describe("SwitchModeTool", () => {
 
 	// ===== current mode source =====
 
-	it("should read the current mode from the task, not providerRef state", async () => {
-		// The task's own mode is the source of truth for the current mode.
+	it("reads the current mode from the task when provider state differs", async () => {
 		vi.mocked(mockTask.getTaskMode).mockResolvedValue("architect")
+		mockGetState.mockResolvedValue({ mode: "orchestrator", customModes: [] })
 
 		const block = createBlock({ mode_slug: "code", reason: "switching back" })
 

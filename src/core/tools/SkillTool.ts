@@ -43,9 +43,7 @@ export class SkillTool extends BaseTool<"skill"> {
 				return
 			}
 
-			// Resolve skills against the task's own mode, not the provider's global mode:
-			// a delegated subtask runs in its own mode while provider state still reflects
-			// the parent task, which would misresolve skill availability.
+			// Resolve skills against the task's mode, not shared provider state.
 			const currentMode = await task.getTaskMode()
 
 			// Fetch skill content

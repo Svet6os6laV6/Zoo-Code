@@ -2,6 +2,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { presentAssistantMessage } from "../presentAssistantMessage"
+import type { RequestPolicySnapshot } from "../../prompts/tools/effective-tool-policy"
 import type { Task } from "../../task/Task"
 
 // presentAssistantMessage records tool usage through TelemetryService.instance.
@@ -35,10 +36,20 @@ vi.mock("@roo-code/core", async (importOriginal) => ({
  * code-mode child of an orchestrator-mode parent has every tool rejected with
  * `Tool "read_file" is not allowed in orchestrator mode.`
  */
+// The policy snapshot the presenter consumes; the mocks below deliberately
+// keep it minimal so any live provider-state re-read stays visible in the
+// assertions (mirrors the upstream presenter specs).
+const baseSnapshot: RequestPolicySnapshot = {
+	disabledTools: [],
+	customModes: [],
+	experiments: {},
+}
+
 describe("presentAssistantMessage - task-local mode validation", () => {
 	const createMockTask = (providerMode: string, taskMode: string) => ({
 		taskId: "test-task-id",
 		instanceId: "test-instance",
+		activeToolContexts: new Map(),
 		abort: false,
 		presentAssistantMessageLocked: false,
 		presentAssistantMessageHasPendingUpdates: false,
@@ -94,7 +105,7 @@ describe("presentAssistantMessage - task-local mode validation", () => {
 
 		// The mock is a partial Task double; the double assertion is required because
 		// presentAssistantMessage only reads the fields exercised above.
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		// Validation passed against the task's own mode, so the attempt is recorded...
 		expect(mockTask.recordToolUsage).toHaveBeenCalledWith("read_file")
@@ -119,7 +130,7 @@ describe("presentAssistantMessage - task-local mode validation", () => {
 			},
 		]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockTask.recordToolError).toHaveBeenCalledWith(
 			"read_file",

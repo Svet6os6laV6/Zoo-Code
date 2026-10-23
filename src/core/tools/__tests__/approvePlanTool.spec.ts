@@ -90,6 +90,7 @@ describe("approvePlanTool", () => {
 			askApproval: vi.fn().mockResolvedValue(true),
 			handleError: vi.fn(),
 			pushToolResult: vi.fn(),
+			toolCallId: "test-tool-call-id",
 		}
 	})
 

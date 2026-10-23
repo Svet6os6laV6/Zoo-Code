@@ -71,9 +71,7 @@ export class SwitchModeTool extends BaseTool<"switch_mode"> {
 				return
 			}
 
-			// Check if already in requested mode. Use the task's own mode: under the
-			// per-task mode model provider state still reflects the parent task, so a
-			// delegated subtask would otherwise compare against the wrong mode.
+			// Mode belongs to the task; provider state may still reflect its parent.
 			const currentMode = await task.getTaskMode()
 
 			if (currentMode === mode_slug) {

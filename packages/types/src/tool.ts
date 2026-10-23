@@ -58,7 +58,7 @@ export type ToolName = z.infer<typeof toolNamesSchema>
  * ToolUsage
  */
 
-export const toolUsageSchema = z.record(
+export const toolUsageSchema = z.partialRecord(
 	toolNamesSchema,
 	z.object({
 		attempts: z.number(),

@@ -10,10 +10,10 @@
 			"type": "extensionHost",
 			"request": "launch",
 			"runtimeExecutable": "${execPath}",
-
 			"args": [
 				"/home/svetoslav/GolandProjects/yandex_market_price",
-				"--extensionDevelopmentPath=${workspaceFolder}/src"
+				"--extensionDevelopmentPath=${workspaceFolder}/src",
+				"--disable-extensions"
 			],
 			"sourceMaps": true,
 			"outFiles": ["${workspaceFolder}/src/dist/**/*.js"],

@@ -91,11 +91,6 @@ export function getAllModes(customModes?: ModeConfig[]): ModeConfig[] {
 	return allModes
 }
 
-// Check if a mode is custom or an override
-export function isCustomMode(slug: string, customModes?: ModeConfig[]): boolean {
-	return !!customModes?.some((mode) => mode.slug === slug)
-}
-
 /**
  * Find a mode by its slug, don't fall back to built-in modes
  */

@@ -4,6 +4,7 @@ import type { Anthropic } from "@anthropic-ai/sdk"
 import { describe, it, expect, beforeEach, vi } from "vitest"
 
 import { presentAssistantMessage } from "../presentAssistantMessage"
+import type { RequestPolicySnapshot } from "../../prompts/tools/effective-tool-policy"
 import type { Task } from "../../task/Task"
 
 const mockResolve = vi.hoisted(() => vi.fn())
@@ -59,6 +60,7 @@ interface MockTask {
 	taskId: string
 	instanceId: string
 	parentTaskId?: string
+	activeToolContexts?: Map<string, unknown>
 	abort: boolean
 	presentAssistantMessageLocked: boolean
 	presentAssistantMessageHasPendingUpdates: boolean
@@ -113,6 +115,15 @@ function applyPatchBlock(relPath: string) {
 	}
 }
 
+// The policy snapshot the presenter consumes; the mocks below deliberately
+// keep it minimal so any live provider-state re-read stays visible in the
+// assertions (mirrors the upstream presenter specs).
+const baseSnapshot: RequestPolicySnapshot = {
+	disabledTools: [],
+	customModes: [],
+	experiments: {},
+}
+
 describe("presentAssistantMessage - artifact mutation gate", () => {
 	let mockTask: MockTask
 
@@ -121,6 +132,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 
 		mockTask = {
 			taskId: "test-task-id",
+			activeToolContexts: new Map(),
 			instanceId: "test-instance",
 			parentTaskId: undefined,
 			abort: false,
@@ -183,7 +195,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "PLAN_READY" })
 		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T01-x.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).not.toHaveBeenCalled()
 		expect(mockTask.userMessageContent).toHaveLength(1)
@@ -203,7 +215,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "BLOCKED" })
 		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/README.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).not.toHaveBeenCalled()
 		expect(mockTask.userMessageContent[0].content).toContain("BLOCKED")
@@ -213,7 +225,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION" })
 		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T01-x.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)
@@ -223,7 +235,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "PLAN_READY" })
 		mockTask.assistantMessageContent = [writeToFileBlock("src/core/task/Task.ts")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)
@@ -233,7 +245,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockTask.getTaskContext = vi.fn().mockRejectedValue(new Error("no harness context"))
 		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T01-x.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)
@@ -243,7 +255,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "PLAN_READY" })
 		mockTask.assistantMessageContent = [applyPatchBlock(".roo/tasks/fix-01/implementation/T01-x.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockApplyPatchHandle).not.toHaveBeenCalled()
 		expect(mockTask.userMessageContent[0].content).toContain("PLAN_READY")
@@ -253,7 +265,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION" })
 		mockTask.assistantMessageContent = [applyPatchBlock(".roo/tasks/fix-01/implementation/T01-x.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockApplyPatchHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)
@@ -268,7 +280,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION", currentTaskArtifact: assignedArtifact })
 		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T07-other.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).not.toHaveBeenCalled()
 		expect(mockTask.userMessageContent[0].content).toContain("another unit")
@@ -288,7 +300,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 			writeToFileBlock(".roo/tasks/fix-01/implementation/T05-stage-gates-extension.md"),
 		]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)
@@ -298,7 +310,7 @@ describe("presentAssistantMessage - artifact mutation gate", () => {
 		mockResolve.mockResolvedValue({ status: "IMPLEMENTATION", currentTaskArtifact: null })
 		mockTask.assistantMessageContent = [writeToFileBlock(".roo/tasks/fix-01/implementation/T07-other.md")]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockWriteToFileHandle).toHaveBeenCalledTimes(1)
 		expect(mockTask.userMessageContent).toHaveLength(0)

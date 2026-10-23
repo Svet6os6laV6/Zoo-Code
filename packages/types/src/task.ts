@@ -87,6 +87,7 @@ export interface CreateTaskOptions {
 	taskId?: string
 	enableCheckpoints?: boolean
 	consecutiveMistakeLimit?: number
+	toolRepetitionSoftLimit?: number
 	experiments?: Record<string, boolean>
 	initialTodos?: TodoItem[]
 	/** Initial status for the task's history item (e.g., "active" for child tasks) */
@@ -101,10 +102,6 @@ export enum TaskStatus {
 	Interactive = "interactive",
 	Resumable = "resumable",
 	Idle = "idle",
-	// ponytail: knip flags `None` unused in-repo; kept because this package is
-	// npm-published (@roo-code/types) and the member is public API. Drop it only
-	// with a major version bump.
-	None = "none",
 }
 
 export const taskMetadataSchema = z.object({

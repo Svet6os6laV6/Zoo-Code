@@ -96,6 +96,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -121,6 +122,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -150,6 +152,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -189,6 +192,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -231,6 +235,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -274,6 +279,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -316,6 +322,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -359,6 +366,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -402,6 +410,7 @@ describe("attemptCompletionTool", () => {
 				askApproval: mockAskApproval,
 				handleError: mockHandleError,
 				pushToolResult: mockPushToolResult,
+				toolCallId: "",
 				askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 				toolDescription: mockToolDescription,
 			}
@@ -432,6 +441,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -466,6 +476,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -805,6 +816,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -855,6 +867,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -907,6 +920,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -936,6 +950,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -972,6 +987,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				})
@@ -1001,6 +1017,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				})
@@ -1033,6 +1050,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				}
@@ -1073,6 +1091,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				})
@@ -1104,6 +1123,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				})
@@ -1132,6 +1152,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				})
@@ -1173,6 +1194,7 @@ describe("attemptCompletionTool", () => {
 					askApproval: mockAskApproval,
 					handleError: mockHandleError,
 					pushToolResult: mockPushToolResult,
+					toolCallId: "",
 					askFinishSubTaskApproval: mockAskFinishSubTaskApproval,
 					toolDescription: mockToolDescription,
 				})
@@ -1205,6 +1227,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			taskId: "task_1",
 			flushTelemetryInstallment: vi.fn(),
 			waitForCurrentAssistantMessagePersistence: vi.fn().mockResolvedValue(true),
+			setPendingTaskAction: vi.fn(),
 			...overrides,
 		}
 	}
@@ -1238,6 +1261,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			askApproval: vi.fn(),
 			handleError: vi.fn(),
 			pushToolResult: vi.fn(),
+			toolCallId: "",
 			askFinishSubTaskApproval: vi.fn(),
 			toolDescription: vi.fn(),
 		} as AttemptCompletionCallbacks)
@@ -1273,6 +1297,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			askApproval: vi.fn(),
 			handleError: vi.fn(),
 			pushToolResult: vi.fn(),
+			toolCallId: "",
 			askFinishSubTaskApproval: vi.fn(),
 			toolDescription: vi.fn(),
 		} as AttemptCompletionCallbacks)
@@ -1302,6 +1327,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			askApproval: vi.fn(),
 			handleError: vi.fn(),
 			pushToolResult: vi.fn(),
+			toolCallId: "",
 			askFinishSubTaskApproval: vi.fn(),
 			toolDescription: vi.fn(),
 		} as AttemptCompletionCallbacks)
@@ -1333,6 +1359,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			askApproval: vi.fn(),
 			handleError: vi.fn(),
 			pushToolResult: vi.fn(),
+			toolCallId: "",
 			askFinishSubTaskApproval: vi.fn(),
 			toolDescription: vi.fn(),
 		} as AttemptCompletionCallbacks)
@@ -1362,6 +1389,7 @@ describe("attemptCompletionTool telemetry invariants", () => {
 			pushToolResult: vi.fn(),
 			askFinishSubTaskApproval: vi.fn().mockResolvedValue(false),
 			toolDescription: vi.fn(),
+			toolCallId: "test-tool-call-id",
 			...overrides,
 		})
 

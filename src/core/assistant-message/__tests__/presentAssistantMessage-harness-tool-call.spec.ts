@@ -3,6 +3,7 @@
 import type { Anthropic } from "@anthropic-ai/sdk"
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { presentAssistantMessage } from "../presentAssistantMessage"
+import type { RequestPolicySnapshot } from "../../prompts/tools/effective-tool-policy"
 import type { Task } from "../../task/Task"
 
 const mockHarnessEvent = vi.hoisted(() => vi.fn())
@@ -53,6 +54,7 @@ interface MockTask {
 	taskId: string
 	instanceId: string
 	abort: boolean
+	activeToolContexts?: Map<string, unknown>
 	presentAssistantMessageLocked: boolean
 	presentAssistantMessageHasPendingUpdates: boolean
 	currentStreamingContentIndex: number
@@ -79,6 +81,15 @@ interface MockTask {
 	pushToolResultToUserContent: ReturnType<typeof vi.fn>
 }
 
+// The policy snapshot the presenter consumes; the mocks below deliberately
+// keep it minimal so any live provider-state re-read stays visible in the
+// assertions (mirrors the upstream presenter specs).
+const baseSnapshot: RequestPolicySnapshot = {
+	disabledTools: [],
+	customModes: [],
+	experiments: {},
+}
+
 describe("presentAssistantMessage - harness.tool.call emission", () => {
 	let mockTask: MockTask
 
@@ -87,6 +98,7 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 
 		mockTask = {
 			taskId: "test-task-id",
+			activeToolContexts: new Map(),
 			instanceId: "test-instance",
 			abort: false,
 			presentAssistantMessageLocked: false,
@@ -152,7 +164,7 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 
 		// Simulate several streaming chunks for the same partial block.
 		for (let i = 0; i < 3; i++) {
-			await presentAssistantMessage(mockTask as unknown as Task)
+			await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 		}
 
 		expect(mockHarnessEvent).not.toHaveBeenCalled()
@@ -170,7 +182,7 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 			},
 		]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockHarnessEvent).toHaveBeenCalledTimes(1)
 		expect(mockHarnessEvent).toHaveBeenCalledWith(
@@ -201,7 +213,7 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 			},
 		]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockHarnessEvent).toHaveBeenCalledWith(
 			"harness.tool.call",
@@ -223,7 +235,7 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 			},
 		]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockHarnessEvent).toHaveBeenCalledWith(
 			"harness.tool.call",
@@ -251,7 +263,7 @@ describe("presentAssistantMessage - harness.tool.call emission", () => {
 			},
 		]
 
-		await presentAssistantMessage(mockTask as unknown as Task)
+		await presentAssistantMessage(mockTask as unknown as Task, baseSnapshot)
 
 		expect(mockHarnessEvent).toHaveBeenCalledTimes(1)
 		const attributes = mockHarnessEvent.mock.calls[0][1].attributes

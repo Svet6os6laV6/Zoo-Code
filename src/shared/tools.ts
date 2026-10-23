@@ -2,13 +2,31 @@ import { Anthropic } from "@anthropic-ai/sdk"
 
 import type { ClineAsk, ToolProgressStatus, ToolGroup, ToolName, GenerateImageParams } from "@roo-code/types"
 
+import type { DcgDecision } from "../services/destructive-command-guard/runner"
+
 export type ToolResponse = string | Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam>
+
+/**
+ * Extra inputs that only some ask types consult when resolving auto-approval.
+ * Carried from the tool through `askApproval` into `Task.ask` and onward to
+ * `checkAutoApproval`. All fields are optional, so tools that pass nothing
+ * keep the existing behavior.
+ */
+export type AutoApprovalContext = {
+	/**
+	 * Verdict of a Destructive Command Guard run the tool already performed
+	 * for this exact command (`execute_command` only). Infra failures never
+	 * produce a verdict — they surface as a retryable tool error beforehand.
+	 */
+	dcgDecision?: DcgDecision
+}
 
 export type AskApproval = (
 	type: ClineAsk,
 	partialMessage?: string,
 	progressStatus?: ToolProgressStatus,
 	forceApproval?: boolean,
+	autoApprovalContext?: AutoApprovalContext,
 ) => Promise<boolean>
 
 export type HandleError = (action: string, error: Error) => Promise<void>
@@ -165,9 +183,18 @@ export interface McpToolUse {
 	partial: boolean
 }
 
+/**
+ * @public
+ */
 export interface AttemptCompletionToolUse extends ToolUse<"attempt_completion"> {
 	name: "attempt_completion"
 	params: Partial<Pick<Record<ToolParamName, string>, "result">>
+}
+
+/** @internal Type used by tool-argument regression tests. */
+export interface WriteToFileToolUse extends ToolUse<"write_to_file"> {
+	name: "write_to_file"
+	params: Partial<Pick<Record<ToolParamName, string>, "path" | "content">>
 }
 
 // Define tool group configuration
@@ -233,7 +260,7 @@ export const TOOL_ALIASES: Record<string, ToolName> = {
 } as const
 
 export type DiffResult =
-	| { success: true; content: string; failParts?: DiffResult[] }
+	| { success: true; content: string; failParts?: DiffResult[]; blockCount?: number }
 	| ({
 			success: false
 			error?: string
