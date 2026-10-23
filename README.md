@@ -101,6 +101,19 @@ Zoo Code adapts to how you work:
 Learn more: [Using Modes](https://docs.zoocode.dev/basic-usage/using-modes) •
 [Custom Modes](https://docs.zoocode.dev/advanced-usage/custom-modes)
 
+## Task Harness (конвейер задач)
+
+Для многошаговых задач в Zoo Code есть программный конвейер: запустите задачу в
+режиме **Sublimation**, и харнесс проведёт её через фиксированные стадии —
+анализ → реализация → рефакторинг → ревью → QA — с человеческими гейтами
+(подтверждение плана и подтверждение QA), бюджетами на fix-проходы и каноническим
+README задачи как единственным источником правды. Задача определяется по
+Git-ветке, состояние ведётся в `.roo/tasks/<id>/README.md`. Модель делает
+работу; маршрутизацией владеет харнесс.
+
+Как пользоваться и как он устроен: [гайд по харнессу](docs/harness.md) •
+[полная модель lifecycle](docs/architecture/harness-stage-lifecycle-model.md).
+
 ## Resources
 
 - **[Documentation](https://docs.zoocode.dev):** The official guide to
